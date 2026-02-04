@@ -1,0 +1,13 @@
+{
+  "name": "claude-cli-proxy",
+  "version": "0.1.0",
+  "description": "HTTP proxy that wraps Claude CLI for OpenClaw",
+  "main": "server.js",
+  "bin": {
+    "claude-cli-proxy": "./server.js"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "start:debug": "DEBUG=1 node server.js"
+  }
+}

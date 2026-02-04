@@ -1,0 +1,17 @@
+[Unit]
+Description=Claude CLI Proxy Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.openclaw/workspace/claude-cli-proxy
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+Environment="DEBUG=1"
+Environment="CLAUDE_PROXY_PORT=8787"
+# Uncomment and adjust if Claude CLI is not in PATH:
+# Environment="CLAUDE_PATH=%h/.local/bin/claude"
+
+[Install]
+WantedBy=default.target
