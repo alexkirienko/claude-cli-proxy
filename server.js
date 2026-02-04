@@ -247,10 +247,8 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
   };
   resetIdleTimeout();
 
-  // SSE keepalive ping every 15 sec (using SSE comment, not event)
-  const keepaliveInterval = setInterval(() => {
-    res.write(': keepalive\n\n');
-  }, KEEPALIVE_INTERVAL_MS);
+  // SSE keepalive disabled - was causing issues with some clients
+  const keepaliveInterval = null;
 
   // Handle client disconnect
   req.on('close', () => {
@@ -547,32 +545,13 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
       return;
     }
 
-    // Handle init event
+    // Handle init event - just log, don't create blocks (CLI does it)
     if (e.type === 'init' || e.subtype === 'init') {
       emitMonitorEvent('cli_init', {
         requestId,
         sessionId: e.session_id,
         model: e.model
       });
-
-      // Start first text block if not already started
-      if (currentBlockIndex < 0) {
-        currentBlockIndex = 0;
-        currentBlockType = 'text';
-        state.textStarted = true;
-
-        sendSSE(res, 'content_block_start', {
-          type: 'content_block_start',
-          index: 0,
-          content_block: { type: 'text', text: '' }
-        });
-
-        contentBlocks.push({
-          index: 0,
-          type: 'text',
-          started: Date.now()
-        });
-      }
       return;
     }
 
