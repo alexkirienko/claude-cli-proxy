@@ -247,9 +247,9 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
   };
   resetIdleTimeout();
 
-  // SSE keepalive ping every 15 sec
+  // SSE keepalive ping every 15 sec (using SSE comment, not event)
   const keepaliveInterval = setInterval(() => {
-    sendSSE(res, 'ping', { type: 'ping' });
+    res.write(': keepalive\n\n');
   }, KEEPALIVE_INTERVAL_MS);
 
   // Handle client disconnect
