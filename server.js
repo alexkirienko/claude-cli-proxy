@@ -744,7 +744,7 @@ const server = http.createServer(async (req, res) => {
         },
         {
           id: 'sonnet',
-          name: 'Claude Sonnet 4 (CLI)',
+          name: 'Claude Sonnet 4.5 (CLI)',
           type: 'model',
           created_at: Date.now(),
         },

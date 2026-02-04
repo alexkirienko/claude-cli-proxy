@@ -92,7 +92,7 @@ Add to your `openclaw.json`:
           },
           {
             "id": "sonnet",
-            "name": "Claude Sonnet 4 (Proxy)",
+            "name": "Claude Sonnet 4.5 (Proxy)",
             "reasoning": true,
             "input": ["text"],
             "contextWindow": 200000,
