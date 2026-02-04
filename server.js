@@ -30,6 +30,10 @@ const PORT = parseInt(process.env.CLAUDE_PROXY_PORT || process.argv.find((_, i, 
 const CLAUDE_PATH = process.env.CLAUDE_PATH || '/home/alex/.local/bin/claude';
 const DEBUG = process.env.DEBUG === '1';
 
+// Timeout constants
+const IDLE_TIMEOUT_MS = 60 * 1000;          // 60 sec without data = kill child
+const KEEPALIVE_INTERVAL_MS = 15 * 1000;    // 15 sec SSE ping
+
 // Global event bus for monitoring
 const proxyEvents = new EventEmitter();
 const monitorClients = new Set();
@@ -231,6 +235,31 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
   let currentBlockIndex = -1;
   let currentBlockType = null;
 
+  // Idle timeout - kill child if no output for 60 sec
+  let idleTimeout;
+  const resetIdleTimeout = () => {
+    clearTimeout(idleTimeout);
+    idleTimeout = setTimeout(() => {
+      log(`[${requestId}] Idle timeout (${IDLE_TIMEOUT_MS}ms), killing child`);
+      emitMonitorEvent('cli_timeout', { requestId, type: 'idle' });
+      child.kill('SIGTERM');
+    }, IDLE_TIMEOUT_MS);
+  };
+  resetIdleTimeout();
+
+  // SSE keepalive ping every 15 sec
+  const keepaliveInterval = setInterval(() => {
+    sendSSE(res, 'ping', { type: 'ping' });
+  }, KEEPALIVE_INTERVAL_MS);
+
+  // Handle client disconnect
+  req.on('close', () => {
+    log(`[${requestId}] Client disconnected, killing child`);
+    clearTimeout(idleTimeout);
+    clearInterval(keepaliveInterval);
+    child.kill('SIGTERM');
+  });
+
   // Tracking state
   const state = {
     messageStarted: false,
@@ -258,6 +287,7 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
   let buffer = '';
 
   child.stdout.on('data', (data) => {
+    resetIdleTimeout();  // Reset idle timeout on each data chunk
     buffer += data.toString();
     const lines = buffer.split('\n');
     buffer = lines.pop() || '';
@@ -286,6 +316,10 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
   });
 
   child.on('close', (code) => {
+    // Clear timeouts
+    clearTimeout(idleTimeout);
+    clearInterval(keepaliveInterval);
+
     // Close any open content blocks
     if (state.thinking || state.textStarted || state.toolUse) {
       sendSSE(res, 'content_block_stop', {
@@ -316,6 +350,10 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
   });
 
   child.on('error', (err) => {
+    // Clear timeouts
+    clearTimeout(idleTimeout);
+    clearInterval(keepaliveInterval);
+
     log(`[${requestId}] Spawn error:`, err.message);
     emitMonitorEvent('cli_error', { requestId, error: err.message });
 
