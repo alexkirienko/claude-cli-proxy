@@ -266,6 +266,7 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
     thinking: false,
     toolUse: null,
     textStarted: false,
+    textSent: false,  // Track if text was already sent via text_delta streaming
   };
 
   // Send message_start
@@ -434,6 +435,11 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
         });
       }
 
+      // Track text_delta - mark that text was already streamed
+      if (delta.type === 'text_delta') {
+        state.textSent = true;
+      }
+
       return;
     }
 
@@ -586,9 +592,9 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
         resultPreview: (e.result || '').slice(0, 100)
       });
 
-      // Always emit result as text delta if we have result text
-      // This ensures text is sent even if content_block_start was already emitted
-      if (e.result) {
+      // Emit result as text delta ONLY if text wasn't already sent via streaming
+      // With --include-partial-messages, text is streamed via text_delta events
+      if (e.result && !state.textSent) {
         if (currentBlockIndex < 0) {
           currentBlockIndex = 0;
           sendSSE(res, 'content_block_start', {
