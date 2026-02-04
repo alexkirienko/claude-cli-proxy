@@ -23,7 +23,7 @@ Claude CLI uses your Claude Max subscription ($200/month unlimited) instead of p
 ## Installation
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/claude-cli-proxy.git
+git clone https://github.com/alexkirienko/claude-cli-proxy.git
 cd claude-cli-proxy
 npm install  # no dependencies, but creates node_modules
 ```
