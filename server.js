@@ -72,7 +72,10 @@ function generateMessageId() {
  */
 function sendSSE(res, eventType, data) {
   const line = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
+  debug('SSE out:', eventType, 'len:', line.length);
   res.write(line);
+  // Force flush if cork is active to prevent SSE event merging
+  if (res.writableCorked) res.uncork();
 
   // Also emit to monitoring
   emitMonitorEvent('sse_out', { eventType, data });
@@ -228,6 +231,9 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
     'X-Request-Id': requestId,
   });
 
+  // Disable Nagle's algorithm to prevent TCP buffering of SSE events
+  if (res.socket) res.socket.setNoDelay(true);
+
   const messageId = requestId;
   let inputTokens = 0;
   let outputTokens = 0;
@@ -370,9 +376,11 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
       usage: { output_tokens: outputTokens }
     });
 
-    // Send message_stop
-    sendSSE(res, 'message_stop', { type: 'message_stop' });
-    res.end();
+    // Give time for final SSE events to flush before ending the response
+    setTimeout(() => {
+      sendSSE(res, 'message_stop', { type: 'message_stop' });
+      res.end();
+    }, 10);
 
     emitMonitorEvent('request_complete', {
       requestId,
