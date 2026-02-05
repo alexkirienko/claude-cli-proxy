@@ -289,28 +289,59 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
     resetIdleTimeout();  // Reset idle timeout on each data chunk
     buffer += data.toString();
 
-    // Handle both newline-separated and concatenated JSON objects
-    // Replace }{ with }\n{ to normalize concatenated JSON (fast streaming can produce this)
-    buffer = buffer.replace(/\}\s*\{/g, '}\n{');
+    // Extract complete JSON objects from buffer using brace counting
+    // This handles concatenated JSON (no newline between objects) correctly
+    let startIndex = 0;
+    let braceCount = 0;
+    let inString = false;
+    let escapeNext = false;
 
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';  // Keep incomplete line for next chunk
+    for (let i = 0; i < buffer.length; i++) {
+      const char = buffer[i];
 
-    for (const line of lines) {
-      if (!line.trim()) continue;
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
 
-      try {
-        const event = JSON.parse(line);
-        // Handle raw events (new in 2.1.29) or wrapped stream_event (Phase 1)
-        if (event.type === 'stream_event' && event.event) {
-          processStreamEvent(event.event, res, state, contentBlocks, messageId, model, requestId);
-        } else {
-          processStreamEvent(event, res, state, contentBlocks, messageId, model, requestId);
+      if (char === '\\' && inString) {
+        escapeNext = true;
+        continue;
+      }
+
+      if (char === '"') {
+        inString = !inString;
+        continue;
+      }
+
+      if (!inString) {
+        if (char === '{') {
+          if (braceCount === 0) startIndex = i;
+          braceCount++;
+        } else if (char === '}') {
+          braceCount--;
+          if (braceCount === 0) {
+            // Complete JSON object found
+            const jsonStr = buffer.slice(startIndex, i + 1);
+            try {
+              const event = JSON.parse(jsonStr);
+              // Handle raw events (new in 2.1.29) or wrapped stream_event (Phase 1)
+              if (event.type === 'stream_event' && event.event) {
+                processStreamEvent(event.event, res, state, contentBlocks, messageId, model, requestId);
+              } else {
+                processStreamEvent(event, res, state, contentBlocks, messageId, model, requestId);
+              }
+            } catch (e) {
+              log(`[${requestId}] JSON parse error: ${e.message}, json: ${jsonStr.slice(0, 100)}`);
+            }
+            startIndex = i + 1;
+          }
         }
-      } catch (e) {
-        log(`[${requestId}] JSON parse error: ${e.message}, line: ${line.slice(0, 100)}`);
       }
     }
+
+    // Keep unparsed remainder in buffer (incomplete JSON or whitespace/newlines before next object)
+    buffer = buffer.slice(startIndex);
   });
 
   child.stderr.on('data', (data) => {
