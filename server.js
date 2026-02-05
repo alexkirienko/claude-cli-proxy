@@ -32,6 +32,7 @@ const DEBUG = process.env.DEBUG === '1';
 
 // Timeout constants
 const IDLE_TIMEOUT_MS = 60 * 1000;          // 60 sec without data = kill child
+const TOOL_IDLE_TIMEOUT_MS = 300 * 1000;    // 5 min during tool execution (CLI runs tools locally)
 const KEEPALIVE_INTERVAL_MS = 15 * 1000;    // 15 sec SSE ping
 
 // Global event bus for monitoring
@@ -240,16 +241,29 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
   let contentBlocks = [];
   let currentBlockIndex = -1;
   let currentBlockType = null;
+  let sseBlockIndex = -1;           // SSE output index (excludes filtered tool_use blocks)
+  let insideToolUseBlock = false;   // true during tool_use block streaming
 
-  // Idle timeout - kill child if no output for 60 sec
+  // Tracking state (must be declared before resetIdleTimeout which references it)
+  const state = {
+    messageStarted: false,
+    thinking: false,
+    toolUse: null,
+    textStarted: false,
+    textSent: false,  // Track if text was already sent via text_delta streaming
+    toolExecuting: false,  // true from tool_use start until next text/thinking block
+  };
+
+  // Idle timeout - kill child if no output for configured period
   let idleTimeout;
   const resetIdleTimeout = () => {
     clearTimeout(idleTimeout);
+    const timeoutMs = state.toolExecuting ? TOOL_IDLE_TIMEOUT_MS : IDLE_TIMEOUT_MS;
     idleTimeout = setTimeout(() => {
-      log(`[${requestId}] Idle timeout (${IDLE_TIMEOUT_MS}ms), killing child`);
-      emitMonitorEvent('cli_timeout', { requestId, type: 'idle' });
+      log(`[${requestId}] Idle timeout (${timeoutMs}ms, toolExecuting=${state.toolExecuting}), killing child`);
+      emitMonitorEvent('cli_timeout', { requestId, type: 'idle', toolExecuting: state.toolExecuting });
       child.kill('SIGTERM');
-    }, IDLE_TIMEOUT_MS);
+    }, timeoutMs);
   };
   resetIdleTimeout();
 
@@ -263,15 +277,6 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
     clearInterval(keepaliveInterval);
     child.kill('SIGTERM');
   });
-
-  // Tracking state
-  const state = {
-    messageStarted: false,
-    thinking: false,
-    toolUse: null,
-    textStarted: false,
-    textSent: false,  // Track if text was already sent via text_delta streaming
-  };
 
   // Send message_start
   sendSSE(res, 'message_start', {
@@ -361,11 +366,11 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
     clearTimeout(idleTimeout);
     clearInterval(keepaliveInterval);
 
-    // Close any open content blocks
-    if (state.thinking || state.textStarted || state.toolUse) {
+    // Close any open non-tool_use content blocks visible to gateway
+    if ((state.thinking || state.textStarted) && !insideToolUseBlock) {
       sendSSE(res, 'content_block_stop', {
         type: 'content_block_stop',
-        index: currentBlockIndex >= 0 ? currentBlockIndex : 0
+        index: sseBlockIndex >= 0 ? sseBlockIndex : 0
       });
     }
 
@@ -423,26 +428,38 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
         started: Date.now()
       });
 
-      sendSSE(res, 'content_block_start', {
-        type: 'content_block_start',
-        index: currentBlockIndex,
-        content_block: block
-      });
-
-      if (block.type === 'thinking') {
-        state.thinking = true;
-        emitMonitorEvent('thinking_start', { requestId, index: currentBlockIndex });
-      } else if (block.type === 'tool_use') {
+      if (block.type === 'tool_use') {
+        // Filter tool_use from SSE output — CLI handles tools internally.
+        // Forwarding these causes gateway to attempt (and fail) tool execution → retry loop.
+        insideToolUseBlock = true;
+        state.toolExecuting = true;
         state.toolUse = { id: block.id, name: block.name, input: '' };
+        resetIdleTimeout();  // Switch to longer timeout
         emitMonitorEvent('tool_use_start', {
           requestId,
           index: currentBlockIndex,
           toolId: block.id,
           toolName: block.name
         });
-      } else if (block.type === 'text') {
-        state.textStarted = true;
-        emitMonitorEvent('text_start', { requestId, index: currentBlockIndex });
+      } else {
+        // thinking or text — send to gateway
+        state.toolExecuting = false;
+        resetIdleTimeout();  // Switch back to normal timeout
+        sseBlockIndex++;
+
+        sendSSE(res, 'content_block_start', {
+          type: 'content_block_start',
+          index: sseBlockIndex,
+          content_block: block
+        });
+
+        if (block.type === 'thinking') {
+          state.thinking = true;
+          emitMonitorEvent('thinking_start', { requestId, index: sseBlockIndex });
+        } else if (block.type === 'text') {
+          state.textStarted = true;
+          emitMonitorEvent('text_start', { requestId, index: sseBlockIndex });
+        }
       }
 
       return;
@@ -452,27 +469,31 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
     if (e.type === 'content_block_delta') {
       const delta = e.delta;
 
+      // Filter tool_use deltas — don't forward to gateway
+      if (insideToolUseBlock) {
+        if (delta.type === 'input_json_delta' && state.toolUse) {
+          state.toolUse.input += delta.partial_json || '';
+          emitMonitorEvent('tool_input_delta', {
+            requestId,
+            index: currentBlockIndex,
+            partialJson: delta.partial_json
+          });
+        }
+        return;
+      }
+
+      // Forward thinking/text deltas with remapped index
       sendSSE(res, 'content_block_delta', {
         type: 'content_block_delta',
-        index: e.index !== undefined ? e.index : currentBlockIndex,
+        index: sseBlockIndex >= 0 ? sseBlockIndex : 0,
         delta: delta
       });
-
-      // Track tool input accumulation
-      if (delta.type === 'input_json_delta' && state.toolUse) {
-        state.toolUse.input += delta.partial_json || '';
-        emitMonitorEvent('tool_input_delta', {
-          requestId,
-          index: e.index,
-          partialJson: delta.partial_json
-        });
-      }
 
       // Track thinking content
       if (delta.type === 'thinking_delta') {
         emitMonitorEvent('thinking_delta', {
           requestId,
-          index: e.index,
+          index: sseBlockIndex,
           thinkingPreview: (delta.thinking || '').slice(0, 100)
         });
       }
@@ -493,34 +514,40 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
         blockInfo.duration = blockInfo.ended - blockInfo.started;
       }
 
-      sendSSE(res, 'content_block_stop', {
-        type: 'content_block_stop',
-        index: e.index !== undefined ? e.index : currentBlockIndex
-      });
-
-      if (currentBlockType === 'thinking') {
-        state.thinking = false;
-        emitMonitorEvent('thinking_end', {
-          requestId,
-          index: e.index,
-          duration: blockInfo?.duration
-        });
-      } else if (currentBlockType === 'tool_use' && state.toolUse) {
+      if (currentBlockType === 'tool_use') {
+        // Don't forward tool_use stop to gateway
         emitMonitorEvent('tool_use_end', {
           requestId,
-          index: e.index,
-          toolId: state.toolUse.id,
-          toolName: state.toolUse.name,
+          index: currentBlockIndex,
+          toolId: state.toolUse?.id,
+          toolName: state.toolUse?.name,
           duration: blockInfo?.duration
         });
         state.toolUse = null;
-      } else if (currentBlockType === 'text') {
-        state.textStarted = false;
-        emitMonitorEvent('text_end', {
-          requestId,
-          index: e.index,
-          duration: blockInfo?.duration
+        insideToolUseBlock = false;
+        // Note: toolExecuting stays true until next thinking/text block starts
+      } else {
+        // Forward thinking/text stop with remapped index
+        sendSSE(res, 'content_block_stop', {
+          type: 'content_block_stop',
+          index: sseBlockIndex >= 0 ? sseBlockIndex : 0
         });
+
+        if (currentBlockType === 'thinking') {
+          state.thinking = false;
+          emitMonitorEvent('thinking_end', {
+            requestId,
+            index: sseBlockIndex,
+            duration: blockInfo?.duration
+          });
+        } else if (currentBlockType === 'text') {
+          state.textStarted = false;
+          emitMonitorEvent('text_end', {
+            requestId,
+            index: sseBlockIndex,
+            duration: blockInfo?.duration
+          });
+        }
       }
 
       currentBlockType = null;
@@ -618,8 +645,8 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
       // Emit result as text delta ONLY if text wasn't already sent via streaming
       // With --include-partial-messages, text is streamed via text_delta events
       if (e.result && !state.textSent) {
-        if (currentBlockIndex < 0) {
-          currentBlockIndex = 0;
+        if (sseBlockIndex < 0) {
+          sseBlockIndex = 0;
           sendSSE(res, 'content_block_start', {
             type: 'content_block_start',
             index: 0,
@@ -635,7 +662,7 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
 
         sendSSE(res, 'content_block_delta', {
           type: 'content_block_delta',
-          index: currentBlockIndex,
+          index: sseBlockIndex,
           delta: { type: 'text_delta', text: e.result }
         });
       }
