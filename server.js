@@ -39,6 +39,7 @@ try {
 // Timeout constants
 const IDLE_TIMEOUT_MS = 60 * 1000;          // 60 sec without data = kill child
 const TOOL_IDLE_TIMEOUT_MS = 300 * 1000;    // 5 min during tool execution (CLI runs tools locally)
+const COMPACTION_TIMEOUT_MS = 600 * 1000;    // 10 min during compaction
 const KEEPALIVE_INTERVAL_MS = 15 * 1000;    // 15 sec SSE ping
 
 // Global event bus for monitoring
@@ -262,13 +263,18 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
     textStarted: false,
     textSent: false,  // Track if text was already sent via text_delta streaming
     toolExecuting: false,  // true from tool_use start until next text/thinking block
+    compacting: false,     // true from compact_boundary until next content block
   };
 
   // Idle timeout - kill child if no output for configured period
   let idleTimeout;
   const resetIdleTimeout = () => {
     clearTimeout(idleTimeout);
-    const timeoutMs = state.toolExecuting ? TOOL_IDLE_TIMEOUT_MS : IDLE_TIMEOUT_MS;
+    const timeoutMs = state.compacting
+      ? COMPACTION_TIMEOUT_MS
+      : state.toolExecuting
+        ? TOOL_IDLE_TIMEOUT_MS
+        : IDLE_TIMEOUT_MS;
     idleTimeout = setTimeout(() => {
       log(`[${requestId}] Idle timeout (${timeoutMs}ms, toolExecuting=${state.toolExecuting}), killing child`);
       emitMonitorEvent('cli_timeout', { requestId, type: 'idle', toolExecuting: state.toolExecuting });
@@ -453,6 +459,7 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
         });
       } else {
         // thinking or text — send to gateway
+        state.compacting = false;   // compaction done, content flowing again
         state.toolExecuting = false;
         resetIdleTimeout();  // Switch back to normal timeout
         sseBlockIndex++;
@@ -614,7 +621,48 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
       return;
     }
 
-    // Handle system_event (API calls, tool results, etc.)
+    // Handle system events (compaction, errors, status, etc.)
+    if (e.type === 'system') {
+      if (e.subtype === 'compact_boundary') {
+        state.compacting = true;
+        resetIdleTimeout();  // Switch to 10-min timeout
+        const meta = e.compact_metadata || {};
+        log(`[${requestId}] Context compaction started (trigger=${meta.trigger}, pre_tokens=${meta.pre_tokens})`);
+        emitMonitorEvent('context_compaction', {
+          requestId,
+          trigger: meta.trigger,
+          preTokens: meta.pre_tokens
+        });
+        // Inject notification into SSE stream
+        sseBlockIndex++;
+        sendSSE(res, 'content_block_start', {
+          type: 'content_block_start',
+          index: sseBlockIndex,
+          content_block: { type: 'text', text: '' }
+        });
+        const triggerLabel = meta.trigger === 'manual' ? 'Manual' : 'Auto';
+        const tokensLabel = meta.pre_tokens ? ` (${meta.pre_tokens} tokens)` : '';
+        sendSSE(res, 'content_block_delta', {
+          type: 'content_block_delta',
+          index: sseBlockIndex,
+          delta: { type: 'text_delta', text: `[${triggerLabel} context compaction${tokensLabel} — summarizing conversation history...]` }
+        });
+        sendSSE(res, 'content_block_stop', {
+          type: 'content_block_stop',
+          index: sseBlockIndex
+        });
+      } else {
+        // Log other system events (api_error, status, etc.)
+        emitMonitorEvent('system_event', {
+          requestId,
+          subtype: e.subtype,
+          data: e
+        });
+      }
+      return;
+    }
+
+    // Handle system_event (legacy wrapper format)
     if (e.system_event) {
       const sysEvent = e.system_event;
       emitMonitorEvent('system_event', {
