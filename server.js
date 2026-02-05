@@ -541,7 +541,7 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
         systemEventType: sysEvent.type,
         data: sysEvent
       });
-      sendSSE(res, 'ping', { type: 'ping' });
+      // Don't send ping - not a standard Anthropic event, causes parse errors
       return;
     }
 
