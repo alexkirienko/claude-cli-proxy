@@ -30,6 +30,12 @@ const PORT = parseInt(process.env.CLAUDE_PROXY_PORT || process.argv.find((_, i, 
 const CLAUDE_PATH = process.env.CLAUDE_PATH || '/home/alex/.local/bin/claude';
 const DEBUG = process.env.DEBUG === '1';
 
+// Detect Claude CLI version at startup
+let cliVersion = 'unknown';
+try {
+  cliVersion = require('child_process').execSync(`${CLAUDE_PATH} --version 2>/dev/null`, { timeout: 5000 }).toString().trim();
+} catch {}
+
 // Timeout constants
 const IDLE_TIMEOUT_MS = 60 * 1000;          // 60 sec without data = kill child
 const TOOL_IDLE_TIMEOUT_MS = 300 * 1000;    // 5 min during tool execution (CLI runs tools locally)
@@ -113,6 +119,8 @@ async function handleMessages(req, res) {
   }
 
   // Build full conversation context from all messages
+  // Uses XML tags to prevent the model from fabricating user messages
+  // (plain "Human:"/"Assistant:" format causes the model to continue the pattern)
   let prompt = '';
 
   // If system prompt provided, include it
@@ -129,13 +137,13 @@ async function handleMessages(req, res) {
       sysText = system.text;
     }
     if (sysText) {
-      prompt += `System: ${sysText}\n\n`;
+      prompt += `<system>\n${sysText}\n</system>\n\n`;
     }
   }
 
   // Include all messages for context (not just last user message)
   for (const msg of messages) {
-    const role = msg.role === 'user' ? 'Human' : 'Assistant';
+    const tag = msg.role === 'user' ? 'user' : 'assistant';
     let content = '';
     if (typeof msg.content === 'string') {
       content = msg.content;
@@ -146,11 +154,13 @@ async function handleMessages(req, res) {
         .join('\n');
     }
     if (content) {
-      prompt += `${role}: ${content}\n\n`;
+      prompt += `<${tag}>\n${content}\n</${tag}>\n\n`;
     }
   }
 
-  // Trim trailing newlines
+  // Add instruction to prevent fabricating user messages
+  prompt += `<instruction>Respond only to the last <user> message. Do not generate or simulate additional user messages. Do not continue the conversation beyond your single response.</instruction>`;
+
   prompt = prompt.trim();
 
   // Map model names
@@ -817,7 +827,7 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({
       status: 'ok',
       claude: CLAUDE_PATH,
-      version: '2.0.0',
+      version: cliVersion,
       features: ['streaming', 'tool_use', 'thinking', 'monitoring'],
       monitorClients: monitorClients.size
     }));
