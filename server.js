@@ -288,8 +288,13 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
   child.stdout.on('data', (data) => {
     resetIdleTimeout();  // Reset idle timeout on each data chunk
     buffer += data.toString();
+
+    // Handle both newline-separated and concatenated JSON objects
+    // Replace }{ with }\n{ to normalize concatenated JSON (fast streaming can produce this)
+    buffer = buffer.replace(/\}\s*\{/g, '}\n{');
+
     const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
+    buffer = lines.pop() || '';  // Keep incomplete line for next chunk
 
     for (const line of lines) {
       if (!line.trim()) continue;
@@ -303,7 +308,7 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
           processStreamEvent(event, res, state, contentBlocks, messageId, model, requestId);
         }
       } catch (e) {
-        debug('Parse error:', e.message, line.slice(0, 100));
+        log(`[${requestId}] JSON parse error: ${e.message}, line: ${line.slice(0, 100)}`);
       }
     }
   });
