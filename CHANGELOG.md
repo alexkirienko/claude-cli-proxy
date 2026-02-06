@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.3.2...v0.3.3) (2026-02-06)
+
+
+### Bug Fixes
+
+* detect existing session JSONL on disk to survive proxy restarts — sessions now resume with context even after service restart
+
 ## [0.3.2](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.3.1...v0.3.2) (2026-02-06)
 
 

@@ -187,7 +187,13 @@ async function handleMessages(req, res) {
   const sessionKey = req.headers['x-session-key']
     || crypto.createHash('md5').update((sysText || 'default') + '|' + firstMsgText.slice(0, 200)).digest('hex');
   const sessionUuid = sessionKeyToUuid(sessionKey);
-  let isResume = sessions.has(sessionKey);
+  // Check both in-memory map AND on-disk JSONL to survive proxy restarts
+  const cwdSlug = '/home/alex/.openclaw/workspace'.replace(/[/.]/g, '-');
+  const sessionJsonlPath = path.join(
+    process.env.HOME || '/home/alex', '.claude', 'projects', cwdSlug,
+    `${sessionUuid}.jsonl`
+  );
+  let isResume = sessions.has(sessionKey) || fs.existsSync(sessionJsonlPath);
 
   // Map model names
   let cliModel = model
@@ -320,14 +326,9 @@ async function handleMessages(req, res) {
   // Claude CLI treats an existing JSONL as "session in use" — but we need the JSONL
   // for conversation continuity. Only clear it when we hit the lock error.
   function clearSessionLock() {
-    const cwdSlug = '/home/alex/.openclaw/workspace'.replace(/[/.]/g, '-');
-    const jsonlPath = path.join(
-      process.env.HOME || '/home/alex', '.claude', 'projects', cwdSlug,
-      `${sessionUuid}.jsonl`
-    );
     try {
-      fs.unlinkSync(jsonlPath);
-      log(`[${requestId}] Cleared stale session JSONL: ${path.basename(jsonlPath)}`);
+      fs.unlinkSync(sessionJsonlPath);
+      log(`[${requestId}] Cleared stale session JSONL: ${path.basename(sessionJsonlPath)}`);
     } catch (e) {
       if (e.code !== 'ENOENT') log(`[${requestId}] Failed to clear session JSONL: ${e.message}`);
     }
