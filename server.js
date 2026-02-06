@@ -22,6 +22,8 @@
  */
 
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const { spawn, execSync } = require('child_process');
 const { URL } = require('url');
 
@@ -33,6 +35,18 @@ const crypto = require('crypto');
 // Session management: maps session-key → { uuid, lastUsed }
 const sessions = new Map();
 const SESSION_TTL_MS = 3600 * 1000; // 1 hour
+
+// Active run tracking: session-key → { child, requestId, done, resolveDone }
+const activeRuns = new Map();
+const sessionQueues = new Map(); // sessionKey → Promise (tail of chain)
+
+// Human messages from Telegram contain [from: Name (@user)] tag — these get priority
+
+// Extract sender username from OpenClaw's [from: Name (@user)] tag
+function parseSender(prompt) {
+  const m = prompt.match(/\[from:\s*.+?\(@(\w+)\)\]\s*$/);
+  return m ? m[1].toLowerCase() : null;
+}
 
 // Deterministic UUID from session key
 function sessionKeyToUuid(key) {
@@ -148,6 +162,9 @@ async function handleMessages(req, res) {
   }
   prompt = prompt.trim();
 
+  const sender = parseSender(prompt);
+  const isPriority = sender != null;  // any human Telegram message gets priority
+
   // Extract system prompt text
   let sysText = '';
   if (system) {
@@ -199,8 +216,28 @@ async function handleMessages(req, res) {
     promptPreview: prompt.slice(0, 100)
   });
 
-  // Spawn CLI with session management, with retry on resume failure
-  const spawnCli = (resuming) => {
+  // Handle /stop command — kill active run without spawning CLI
+  if (prompt === '/stop') {
+    const hadActive = activeRuns.has(sessionKey);
+    if (hadActive) {
+      const prev = activeRuns.get(sessionKey);
+      log(`[${requestId}] /stop: killing active run ${prev.requestId} for session ${sessionKey.slice(0, 8)}...`);
+      prev.child.kill('SIGTERM');
+    } else {
+      log(`[${requestId}] /stop: no active run for session ${sessionKey.slice(0, 8)}...`);
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      id: requestId, type: 'message', role: 'assistant', model: model || 'unknown',
+      content: [{ type: 'text', text: hadActive ? 'Stopping current task.' : 'No active task to stop.' }],
+      stop_reason: 'end_turn', stop_sequence: null,
+      usage: { input_tokens: 0, output_tokens: 0 }
+    }));
+    return;
+  }
+
+  // Spawn CLI with session management
+  const spawnCli = () => {
     const args = [
       '--print',
       '--output-format', stream ? 'stream-json' : 'json',
@@ -208,13 +245,11 @@ async function handleMessages(req, res) {
       '--model', cliModel,
     ];
 
-    if (resuming) {
-      args.push('--resume', sessionUuid);
-    } else {
-      args.push('--session-id', sessionUuid);
-      if (sysText) {
-        args.push('--system-prompt', sysText);
-      }
+    // Always use --session-id (works for both new and existing sessions)
+    // and always pass --system-prompt to ensure freshness on every request
+    args.push('--session-id', sessionUuid);
+    if (sysText) {
+      args.push('--system-prompt', sysText);
     }
 
     if (stream) {
@@ -228,7 +263,7 @@ async function handleMessages(req, res) {
     emitMonitorEvent('cli_spawn', {
       requestId,
       model: cliModel,
-      resume: resuming,
+      resume: isResume,
       sessionId: sessionUuid.slice(0, 8),
       args: args.filter(a => !a.startsWith('--system')).slice(0, 10)
     });
@@ -238,6 +273,7 @@ async function handleMessages(req, res) {
 
     const child = spawn(CLAUDE_PATH, args, {
       env,
+      cwd: '/home/alex/.openclaw/workspace',
       stdio: ['pipe', 'pipe', 'pipe']
     });
 
@@ -247,51 +283,62 @@ async function handleMessages(req, res) {
     return child;
   };
 
-  // Spawn with resume if we have a session; on failure, retry with new session
-  const trySpawn = async (resuming) => {
-    const proc = spawnCli(resuming);
+  // Create queue entry BEFORE await to prevent double-wake race condition
+  let resolveDone;
+  const done = new Promise(r => { resolveDone = r; });
+  const prevTail = sessionQueues.get(sessionKey);
+  sessionQueues.set(sessionKey, done);
 
-    if (resuming) {
-      // Wait briefly to detect fast failure (e.g. session not found)
-      const failed = await new Promise((resolve) => {
-        let stderrBuf = '';
-        const onData = (data) => { stderrBuf += data.toString(); };
-        proc.stderr.on('data', onData);
+  // Priority preemption: kill active non-priority run so it finishes fast
+  if (isPriority && activeRuns.has(sessionKey) && !activeRuns.get(sessionKey).isPriority) {
+    const prev = activeRuns.get(sessionKey);
+    log(`[${requestId}] Priority preemption: killing non-priority run ${prev.requestId} for session ${sessionKey.slice(0, 8)}...`);
+    prev.child.kill('SIGTERM');
+  }
 
-        const timer = setTimeout(() => {
-          proc.stderr.removeListener('data', onData);
-          proc.removeListener('close', onClose);
-          resolve(false); // Still running, proceed normally
-        }, 500);
+  // Handle client disconnect while queued (prevent queue hang)
+  let cancelled = false;
+  const onDisconnect = () => { cancelled = true; resolveDone(); };
+  req.on('close', onDisconnect);
 
-        function onClose(code) {
-          clearTimeout(timer);
-          proc.stderr.removeListener('data', onData);
-          if (code !== 0) {
-            log(`[${requestId}] Resume failed (code ${code}), stderr: ${stderrBuf.slice(0, 200)}`);
-            resolve(true);
-          } else {
-            resolve(false);
-          }
-        }
-        proc.on('close', onClose);
-      });
+  if (prevTail) {
+    log(`[${requestId}] Session ${sessionKey.slice(0, 8)}... busy, queuing (priority=${isPriority})...`);
+    await prevTail;
+  }
 
-      if (failed) {
-        sessions.delete(sessionKey);
-        log(`[${requestId}] Retrying with new session`);
-        return trySpawn(false);
-      }
+  req.removeListener('close', onDisconnect);
+  if (cancelled) {
+    log(`[${requestId}] Client disconnected while queued, skipping`);
+    if (sessionQueues.get(sessionKey) === done) sessionQueues.delete(sessionKey);
+    return;
+  }
+
+  // Claude CLI treats an existing JSONL as "session in use" — clear it before each spawn.
+  // The gateway provides full conversation context, so we don't need CLI session persistence.
+  function clearSessionLock() {
+    // Claude CLI slugifies cwd: replace / and . with -, keeping leading -
+    const cwdSlug = '/home/alex/.openclaw/workspace'.replace(/[/.]/g, '-');
+    const jsonlPath = path.join(
+      process.env.HOME || '/home/alex', '.claude', 'projects', cwdSlug,
+      `${sessionUuid}.jsonl`
+    );
+    try {
+      fs.unlinkSync(jsonlPath);
+      debug(`Cleared session JSONL: ${jsonlPath}`);
+    } catch (e) {
+      if (e.code !== 'ENOENT') log(`[${requestId}] Failed to clear session JSONL: ${e.message}`);
     }
+  }
 
-    if (stream) {
-      await handleStreamingResponse(req, res, proc, model, requestId, sessionKey);
-    } else {
-      await handleNonStreamingResponse(req, res, proc, model, requestId, sessionKey);
-    }
-  };
+  clearSessionLock();
+  const proc = spawnCli();
+  activeRuns.set(sessionKey, { child: proc, requestId, done, resolveDone, isPriority, sender });
 
-  await trySpawn(isResume);
+  if (stream) {
+    await handleStreamingResponse(req, res, proc, model, requestId, sessionKey);
+  } else {
+    await handleNonStreamingResponse(req, res, proc, model, requestId, sessionKey);
+  }
 }
 
 /**
@@ -438,6 +485,16 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
   child.on('close', (code) => {
     clearTimeout(idleTimeout);
 
+    // Clean up active run tracking and resolve queue promise
+    const entry = activeRuns.get(sessionKey);
+    if (entry?.requestId === requestId) {
+      entry.resolveDone();
+      activeRuns.delete(sessionKey);
+      if (sessionQueues.get(sessionKey) === entry.done) {
+        sessionQueues.delete(sessionKey);
+      }
+    }
+
     // Track session on success
     if (code === 0 && sessionKey) {
       sessions.set(sessionKey, { uuid: sessionKeyToUuid(sessionKey), lastUsed: Date.now() });
@@ -477,6 +534,16 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
 
   child.on('error', (err) => {
     clearTimeout(idleTimeout);
+
+    // Clean up active run tracking and resolve queue promise
+    const entry = activeRuns.get(sessionKey);
+    if (entry?.requestId === requestId) {
+      entry.resolveDone();
+      activeRuns.delete(sessionKey);
+      if (sessionQueues.get(sessionKey) === entry.done) {
+        sessionQueues.delete(sessionKey);
+      }
+    }
 
     log(`[${requestId}] Spawn error:`, err.message);
     emitMonitorEvent('cli_error', { requestId, error: err.message });
@@ -803,6 +870,16 @@ async function handleNonStreamingResponse(req, res, child, model, requestId, ses
   });
 
   child.on('close', (code) => {
+    // Clean up active run tracking and resolve queue promise
+    const entry = activeRuns.get(sessionKey);
+    if (entry?.requestId === requestId) {
+      entry.resolveDone();
+      activeRuns.delete(sessionKey);
+      if (sessionQueues.get(sessionKey) === entry.done) {
+        sessionQueues.delete(sessionKey);
+      }
+    }
+
     // Track session on success
     if (code === 0 && sessionKey) {
       sessions.set(sessionKey, { uuid: sessionKeyToUuid(sessionKey), lastUsed: Date.now() });
@@ -869,6 +946,16 @@ async function handleNonStreamingResponse(req, res, child, model, requestId, ses
   });
 
   child.on('error', (err) => {
+    // Clean up active run tracking and resolve queue promise
+    const entry = activeRuns.get(sessionKey);
+    if (entry?.requestId === requestId) {
+      entry.resolveDone();
+      activeRuns.delete(sessionKey);
+      if (sessionQueues.get(sessionKey) === entry.done) {
+        sessionQueues.delete(sessionKey);
+      }
+    }
+
     log(`[${requestId}] Spawn error:`, err.message);
     emitMonitorEvent('cli_error', { requestId, error: err.message });
 
@@ -967,6 +1054,17 @@ server.on('error', (err) => {
   }
   process.exit(1);
 });
+
+// Graceful shutdown: kill all tracked CLI children to prevent orphans
+function gracefulShutdown(signal) {
+  log(`Received ${signal}, killing ${activeRuns.size} active CLI processes...`);
+  for (const [key, entry] of activeRuns) {
+    entry.child.kill('SIGTERM');
+  }
+  setTimeout(() => process.exit(0), 2000);
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 server.listen(PORT, '127.0.0.1', () => {
   log(`Claude CLI Proxy v2.0 running on http://127.0.0.1:${PORT}`);
