@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.1](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.3.0...v0.3.1) (2026-02-06)
+
+
+### Bug Fixes
+
+* clear stale session JSONL to prevent "already in use" errors ([b389a8e](https://github.com/alexkirienko/claude-cli-proxy/commit/b389a8e))
+
+
+### Features
+
+* session queuing with priority preemption for human messages
+* `/stop` command to kill active CLI runs
+* graceful shutdown — kill tracked CLI children on SIGTERM/SIGINT
+
 ## [0.3.0](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.2.1...v0.3.0) (2026-02-06)
 
 
