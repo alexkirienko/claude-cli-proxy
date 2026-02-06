@@ -22,9 +22,8 @@
  */
 
 const http = require('http');
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const { URL } = require('url');
-const { EventEmitter } = require('events');
 
 const PORT = parseInt(process.env.CLAUDE_PROXY_PORT || process.argv.find((_, i, a) => a[i-1] === '--port') || '8787', 10);
 const CLAUDE_PATH = process.env.CLAUDE_PATH || '/home/alex/.local/bin/claude';
@@ -56,17 +55,14 @@ setInterval(() => {
 // Detect Claude CLI version at startup
 let cliVersion = 'unknown';
 try {
-  cliVersion = require('child_process').execSync(`${CLAUDE_PATH} --version 2>/dev/null`, { timeout: 5000 }).toString().trim();
+  cliVersion = execSync(`${CLAUDE_PATH} --version 2>/dev/null`, { timeout: 5000 }).toString().trim();
 } catch {}
 
 // Timeout constants
 const IDLE_TIMEOUT_MS = 60 * 1000;          // 60 sec without data = kill child
 const TOOL_IDLE_TIMEOUT_MS = 300 * 1000;    // 5 min during tool execution (CLI runs tools locally)
 const COMPACTION_TIMEOUT_MS = 600 * 1000;    // 10 min during compaction
-const KEEPALIVE_INTERVAL_MS = 15 * 1000;    // 15 sec SSE ping
 
-// Global event bus for monitoring
-const proxyEvents = new EventEmitter();
 const monitorClients = new Set();
 
 function log(...args) {
@@ -167,9 +163,12 @@ async function handleMessages(req, res) {
     }
   }
 
-  // Derive session key from request header or system prompt hash
+  // Derive session key from request header or hash of system prompt + first message
+  const firstMsgText = typeof messages[0]?.content === 'string'
+    ? messages[0].content
+    : (messages[0]?.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
   const sessionKey = req.headers['x-session-key']
-    || crypto.createHash('md5').update(sysText || 'default').digest('hex');
+    || crypto.createHash('md5').update((sysText || 'default') + '|' + firstMsgText.slice(0, 200)).digest('hex');
   const sessionUuid = sessionKeyToUuid(sessionKey);
   let isResume = sessions.has(sessionKey);
 
@@ -223,7 +222,8 @@ async function handleMessages(req, res) {
       args.push('--include-partial-messages');
     }
 
-    log(`[${requestId}] Spawning: claude ${args.join(' ')} [prompt via stdin: ${prompt.length} chars]`);
+    const logArgs = args.map((a, i) => args[i-1] === '--system-prompt' ? `[${a.length} chars]` : a);
+    log(`[${requestId}] Spawning: claude ${logArgs.join(' ')} [prompt via stdin: ${prompt.length} chars]`);
 
     emitMonitorEvent('cli_spawn', {
       requestId,
@@ -345,14 +345,10 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
   };
   resetIdleTimeout();
 
-  // SSE keepalive disabled - was causing issues with some clients
-  const keepaliveInterval = null;
-
   // Handle client disconnect
   req.on('close', () => {
     log(`[${requestId}] Client disconnected, killing child`);
     clearTimeout(idleTimeout);
-    clearInterval(keepaliveInterval);
     child.kill('SIGTERM');
   });
 
@@ -440,9 +436,7 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
   });
 
   child.on('close', (code) => {
-    // Clear timeouts
     clearTimeout(idleTimeout);
-    clearInterval(keepaliveInterval);
 
     // Track session on success
     if (code === 0 && sessionKey) {
@@ -482,9 +476,7 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
   });
 
   child.on('error', (err) => {
-    // Clear timeouts
     clearTimeout(idleTimeout);
-    clearInterval(keepaliveInterval);
 
     log(`[${requestId}] Spawn error:`, err.message);
     emitMonitorEvent('cli_error', { requestId, error: err.message });
@@ -834,8 +826,13 @@ async function handleNonStreamingResponse(req, res, child, model, requestId, ses
       }
     }
 
-    try {
+    if (!result) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { type: 'api_error', message: 'No parseable output from CLI' } }));
+      return;
+    }
 
+    try {
       const response = {
         id: requestId,
         type: 'message',
