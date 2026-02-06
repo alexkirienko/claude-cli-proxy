@@ -29,6 +29,29 @@ const { EventEmitter } = require('events');
 const PORT = parseInt(process.env.CLAUDE_PROXY_PORT || process.argv.find((_, i, a) => a[i-1] === '--port') || '8787', 10);
 const CLAUDE_PATH = process.env.CLAUDE_PATH || '/home/alex/.local/bin/claude';
 const DEBUG = process.env.DEBUG === '1';
+const crypto = require('crypto');
+
+// Session management: maps session-key → { uuid, lastUsed }
+const sessions = new Map();
+const SESSION_TTL_MS = 3600 * 1000; // 1 hour
+
+// Deterministic UUID from session key
+function sessionKeyToUuid(key) {
+  const hash = crypto.createHash('sha256').update(key).digest('hex');
+  return [hash.slice(0,8), hash.slice(8,12), '4'+hash.slice(13,16),
+          '8'+hash.slice(17,20), hash.slice(20,32)].join('-');
+}
+
+// Periodic cleanup every 10 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, info] of sessions) {
+    if (now - info.lastUsed > SESSION_TTL_MS) {
+      log(`[session] Evicting expired session: ${key.slice(0, 8)}...`);
+      sessions.delete(key);
+    }
+  }
+}, 600_000);
 
 // Detect Claude CLI version at startup
 let cliVersion = 'unknown';
@@ -119,14 +142,19 @@ async function handleMessages(req, res) {
     return;
   }
 
-  // Build full conversation context from all messages
-  // Uses XML tags to prevent the model from fabricating user messages
-  // (plain "Human:"/"Assistant:" format causes the model to continue the pattern)
+  // Extract ONLY the last user message (gateway already provides conversation context in it)
   let prompt = '';
+  if (typeof lastUserMsg.content === 'string') {
+    prompt = lastUserMsg.content;
+  } else if (Array.isArray(lastUserMsg.content)) {
+    prompt = lastUserMsg.content
+      .filter(c => c.type === 'text').map(c => c.text).join('\n');
+  }
+  prompt = prompt.trim();
 
-  // If system prompt provided, include it
+  // Extract system prompt text
+  let sysText = '';
   if (system) {
-    let sysText = '';
     if (typeof system === 'string') {
       sysText = system;
     } else if (Array.isArray(system)) {
@@ -137,32 +165,13 @@ async function handleMessages(req, res) {
     } else if (system.text) {
       sysText = system.text;
     }
-    if (sysText) {
-      prompt += `<system>\n${sysText}\n</system>\n\n`;
-    }
   }
 
-  // Include all messages for context (not just last user message)
-  for (const msg of messages) {
-    const tag = msg.role === 'user' ? 'user' : 'assistant';
-    let content = '';
-    if (typeof msg.content === 'string') {
-      content = msg.content;
-    } else if (Array.isArray(msg.content)) {
-      content = msg.content
-        .filter(c => c.type === 'text')
-        .map(c => c.text)
-        .join('\n');
-    }
-    if (content) {
-      prompt += `<${tag}>\n${content}\n</${tag}>\n\n`;
-    }
-  }
-
-  // Add instruction to prevent fabricating user messages
-  prompt += `<instruction>Respond only to the last <user> message. Do not generate or simulate additional user messages. Do not continue the conversation beyond your single response.</instruction>`;
-
-  prompt = prompt.trim();
+  // Derive session key from request header or system prompt hash
+  const sessionKey = req.headers['x-session-key']
+    || crypto.createHash('md5').update(sysText || 'default').digest('hex');
+  const sessionUuid = sessionKeyToUuid(sessionKey);
+  let isResume = sessions.has(sessionKey);
 
   // Map model names
   let cliModel = model
@@ -178,6 +187,7 @@ async function handleMessages(req, res) {
   debug('Model:', model, '->', cliModel);
   debug('Prompt length:', prompt.length);
   debug('Stream requested:', stream);
+  debug('Session:', sessionKey.slice(0, 8) + '...', 'resume:', isResume);
 
   // Emit request started event
   emitMonitorEvent('request_start', {
@@ -185,57 +195,109 @@ async function handleMessages(req, res) {
     model: cliModel,
     promptLength: prompt.length,
     stream,
+    sessionKey: sessionKey.slice(0, 8),
+    isResume,
     promptPreview: prompt.slice(0, 100)
   });
 
-  // Build CLI args
-  const args = [
-    '--print',
-    '--output-format', stream ? 'stream-json' : 'json',
-    '--dangerously-skip-permissions',
-    '--model', cliModel,
-  ];
+  // Spawn CLI with session management, with retry on resume failure
+  const spawnCli = (resuming) => {
+    const args = [
+      '--print',
+      '--output-format', stream ? 'stream-json' : 'json',
+      '--dangerously-skip-permissions',
+      '--model', cliModel,
+    ];
 
-  // stream-json requires --verbose
-  if (stream) {
-    args.push('--verbose');
-    args.push('--include-partial-messages');  // Enable text_delta streaming
-  }
+    if (resuming) {
+      args.push('--resume', sessionUuid);
+    } else {
+      args.push('--session-id', sessionUuid);
+      if (sysText) {
+        args.push('--system-prompt', sysText);
+      }
+    }
 
-  // Prompt will be passed via stdin to avoid E2BIG error for large prompts
-  // (Linux has MAX_ARG_STRLEN ~128KB limit per argument)
+    if (stream) {
+      args.push('--verbose');
+      args.push('--include-partial-messages');
+    }
 
-  log(`[${requestId}] Spawning: claude ${args.join(' ')} [prompt via stdin: ${prompt.length} chars]`);
+    log(`[${requestId}] Spawning: claude ${args.join(' ')} [prompt via stdin: ${prompt.length} chars]`);
 
-  emitMonitorEvent('cli_spawn', {
-    requestId,
-    model: cliModel,
-    args: args.slice(0, 6)
-  });
+    emitMonitorEvent('cli_spawn', {
+      requestId,
+      model: cliModel,
+      resume: resuming,
+      sessionId: sessionUuid.slice(0, 8),
+      args: args.filter(a => !a.startsWith('--system')).slice(0, 10)
+    });
 
-  const env = { ...process.env };
-  delete env.ANTHROPIC_API_KEY;
+    const env = { ...process.env };
+    delete env.ANTHROPIC_API_KEY;
 
-  const child = spawn(CLAUDE_PATH, args, {
-    env,
-    stdio: ['pipe', 'pipe', 'pipe']
-  });
+    const child = spawn(CLAUDE_PATH, args, {
+      env,
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
 
-  // Write prompt to stdin to avoid E2BIG for large prompts
-  child.stdin.write(prompt);
-  child.stdin.end();
+    child.stdin.write(prompt);
+    child.stdin.end();
 
-  if (stream) {
-    await handleStreamingResponse(req, res, child, model, requestId);
-  } else {
-    await handleNonStreamingResponse(req, res, child, model, requestId);
-  }
+    return child;
+  };
+
+  // Spawn with resume if we have a session; on failure, retry with new session
+  const trySpawn = async (resuming) => {
+    const proc = spawnCli(resuming);
+
+    if (resuming) {
+      // Wait briefly to detect fast failure (e.g. session not found)
+      const failed = await new Promise((resolve) => {
+        let stderrBuf = '';
+        const onData = (data) => { stderrBuf += data.toString(); };
+        proc.stderr.on('data', onData);
+
+        const timer = setTimeout(() => {
+          proc.stderr.removeListener('data', onData);
+          proc.removeListener('close', onClose);
+          resolve(false); // Still running, proceed normally
+        }, 500);
+
+        function onClose(code) {
+          clearTimeout(timer);
+          proc.stderr.removeListener('data', onData);
+          if (code !== 0) {
+            log(`[${requestId}] Resume failed (code ${code}), stderr: ${stderrBuf.slice(0, 200)}`);
+            resolve(true);
+          } else {
+            resolve(false);
+          }
+        }
+        proc.on('close', onClose);
+      });
+
+      if (failed) {
+        sessions.delete(sessionKey);
+        log(`[${requestId}] Retrying with new session`);
+        return trySpawn(false);
+      }
+    }
+
+    if (stream) {
+      await handleStreamingResponse(req, res, proc, model, requestId, sessionKey);
+    } else {
+      await handleNonStreamingResponse(req, res, proc, model, requestId, sessionKey);
+    }
+  };
+
+  await trySpawn(isResume);
 }
 
 /**
  * Handle streaming response with full Anthropic event compatibility
  */
-async function handleStreamingResponse(req, res, child, model, requestId) {
+async function handleStreamingResponse(req, res, child, model, requestId, sessionKey) {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -381,6 +443,12 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
     // Clear timeouts
     clearTimeout(idleTimeout);
     clearInterval(keepaliveInterval);
+
+    // Track session on success
+    if (code === 0 && sessionKey) {
+      sessions.set(sessionKey, { uuid: sessionKeyToUuid(sessionKey), lastUsed: Date.now() });
+      log(`[${requestId}] Session saved: ${sessionKey.slice(0, 8)}... (${sessions.size} active)`);
+    }
 
     // Close any open non-tool_use content blocks visible to gateway
     if ((state.thinking || state.textStarted) && !insideToolUseBlock) {
@@ -732,7 +800,7 @@ async function handleStreamingResponse(req, res, child, model, requestId) {
 /**
  * Handle non-streaming response
  */
-async function handleNonStreamingResponse(req, res, child, model, requestId) {
+async function handleNonStreamingResponse(req, res, child, model, requestId, sessionKey) {
   let stdout = '';
   let stderr = '';
 
@@ -743,6 +811,12 @@ async function handleNonStreamingResponse(req, res, child, model, requestId) {
   });
 
   child.on('close', (code) => {
+    // Track session on success
+    if (code === 0 && sessionKey) {
+      sessions.set(sessionKey, { uuid: sessionKeyToUuid(sessionKey), lastUsed: Date.now() });
+      log(`[${requestId}] Session saved: ${sessionKey.slice(0, 8)}... (${sessions.size} active)`);
+    }
+
     // Try to parse JSON output regardless of exit code
     // CLI returns exit 1 for credit issues but still provides valid JSON
     let result;
@@ -834,7 +908,7 @@ const server = http.createServer(async (req, res) => {
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, anthropic-version, x-api-key');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, anthropic-version, x-api-key, x-session-key');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
