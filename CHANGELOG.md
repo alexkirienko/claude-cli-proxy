@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.5](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.3.4...v0.3.5) (2026-02-06)
+
+
+### Bug Fixes
+
+* kill zombie CLI processes when gateway aborts a run — new requests for the same session now preempt the active CLI instead of queuing behind it
+* listen on both req and res for client disconnect to improve socket closure detection
+
 ## [0.3.4](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.3.3...v0.3.4) (2026-02-06)
 
 

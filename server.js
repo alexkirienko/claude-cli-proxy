@@ -300,11 +300,13 @@ async function handleMessages(req, res) {
   const prevTail = sessionQueues.get(sessionKey);
   sessionQueues.set(sessionKey, done);
 
-  // Priority preemption: kill active non-priority run so it finishes fast
-  if (isPriority && activeRuns.has(sessionKey) && !activeRuns.get(sessionKey).isPriority) {
-    const prev = activeRuns.get(sessionKey);
-    log(`[${requestId}] Priority preemption: killing non-priority run ${prev.requestId} for session ${sessionKey.slice(0, 8)}...`);
-    prev.child.kill('SIGTERM');
+  // Session preemption: if a new request arrives for a session that already has
+  // an active CLI, the gateway has abandoned the previous run. Kill it immediately
+  // so the queue unblocks. The old CLI's exit resolves prevTail via resolveDone().
+  const activeRun = activeRuns.get(sessionKey);
+  if (activeRun) {
+    log(`[${requestId}] Preempting active run ${activeRun.requestId} for session ${sessionKey.slice(0, 8)}...`);
+    activeRun.child.kill('SIGTERM');
   }
 
   // Handle client disconnect while queued (prevent queue hang)
@@ -434,12 +436,17 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
   };
   resetIdleTimeout();
 
-  // Handle client disconnect
-  req.on('close', () => {
+  // Handle client disconnect — listen on both req and res for robustness
+  let clientDisconnected = false;
+  const onClientClose = () => {
+    if (clientDisconnected) return;
+    clientDisconnected = true;
     log(`[${requestId}] Client disconnected, killing child`);
     clearTimeout(idleTimeout);
     child.kill('SIGTERM');
-  });
+  };
+  req.on('close', onClientClose);
+  res.on('close', onClientClose);
 
   // Send message_start
   sendSSE(res, 'message_start', {
