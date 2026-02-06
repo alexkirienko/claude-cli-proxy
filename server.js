@@ -252,14 +252,15 @@ async function handleMessages(req, res) {
     ];
 
     // Use --resume for existing sessions (preserves conversation context),
-    // --session-id for new sessions. Always pass --system-prompt for freshness.
+    // --session-id for new sessions. Only pass --system-prompt for new sessions
+    // because it overrides the stored prompt and destroys context on resume.
     if (isResume) {
       args.push('--resume', sessionUuid);
     } else {
       args.push('--session-id', sessionUuid);
-    }
-    if (sysText) {
-      args.push('--system-prompt', sysText);
+      if (sysText) {
+        args.push('--system-prompt', sysText);
+      }
     }
 
     if (stream) {

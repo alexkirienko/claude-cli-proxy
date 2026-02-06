@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.4](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.3.3...v0.3.4) (2026-02-06)
+
+
+### Bug Fixes
+
+* skip --system-prompt on --resume to preserve conversation context — system prompt was overriding stored prompt and destroying session history
+
 ## [0.3.3](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.3.2...v0.3.3) (2026-02-06)
 
 

@@ -1,6 +1,6 @@
 {
   "name": "claude-cli-proxy",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "HTTP proxy that wraps Claude CLI for OpenClaw",
   "main": "server.js",
   "repository": {
