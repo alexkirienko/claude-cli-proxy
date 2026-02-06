@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.3.1...v0.3.2) (2026-02-06)
+
+
+### Bug Fixes
+
+* use --resume for session continuity, only clear JSONL on lock error — preserves conversation context across requests instead of wiping it on every spawn
+
 ## [0.3.1](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.3.0...v0.3.1) (2026-02-06)
 
 

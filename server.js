@@ -245,9 +245,13 @@ async function handleMessages(req, res) {
       '--model', cliModel,
     ];
 
-    // Always use --session-id (works for both new and existing sessions)
-    // and always pass --system-prompt to ensure freshness on every request
-    args.push('--session-id', sessionUuid);
+    // Use --resume for existing sessions (preserves conversation context),
+    // --session-id for new sessions. Always pass --system-prompt for freshness.
+    if (isResume) {
+      args.push('--resume', sessionUuid);
+    } else {
+      args.push('--session-id', sessionUuid);
+    }
     if (sysText) {
       args.push('--system-prompt', sysText);
     }
@@ -313,10 +317,9 @@ async function handleMessages(req, res) {
     return;
   }
 
-  // Claude CLI treats an existing JSONL as "session in use" — clear it before each spawn.
-  // The gateway provides full conversation context, so we don't need CLI session persistence.
+  // Claude CLI treats an existing JSONL as "session in use" — but we need the JSONL
+  // for conversation continuity. Only clear it when we hit the lock error.
   function clearSessionLock() {
-    // Claude CLI slugifies cwd: replace / and . with -, keeping leading -
     const cwdSlug = '/home/alex/.openclaw/workspace'.replace(/[/.]/g, '-');
     const jsonlPath = path.join(
       process.env.HOME || '/home/alex', '.claude', 'projects', cwdSlug,
@@ -324,14 +327,51 @@ async function handleMessages(req, res) {
     );
     try {
       fs.unlinkSync(jsonlPath);
-      debug(`Cleared session JSONL: ${jsonlPath}`);
+      log(`[${requestId}] Cleared stale session JSONL: ${path.basename(jsonlPath)}`);
     } catch (e) {
       if (e.code !== 'ENOENT') log(`[${requestId}] Failed to clear session JSONL: ${e.message}`);
     }
   }
 
-  clearSessionLock();
-  const proc = spawnCli();
+  // Spawn CLI with error recovery:
+  // - "already in use" → clear JSONL, fall back to --session-id (loses context but works)
+  // - --resume fail → fall back to --session-id (new session)
+  async function spawnWithRetry() {
+    const child = spawnCli();
+    let stderrBuf = '';
+    const onStderr = (d) => { stderrBuf += d; };
+    child.stderr.on('data', onStderr);
+
+    const earlyExit = await Promise.race([
+      new Promise(resolve => child.once('close', code => resolve({ exited: true, code }))),
+      new Promise(resolve => setTimeout(() => resolve({ exited: false }), 3000)),
+    ]);
+
+    child.stderr.removeListener('data', onStderr);
+
+    if (!earlyExit.exited) return child; // still running → success
+
+    if (stderrBuf.includes('already in use')) {
+      // Session locked — clear JSONL and retry with fresh session
+      log(`[${requestId}] Session locked, clearing JSONL and retrying...`);
+      clearSessionLock();
+      isResume = false;
+      return spawnCli();
+    }
+
+    if (isResume && earlyExit.code !== 0) {
+      // --resume failed (e.g. session not found) — fall back to new session
+      log(`[${requestId}] Resume failed (${stderrBuf.trim().slice(0, 100)}), falling back to new session`);
+      sessions.delete(sessionKey);
+      isResume = false;
+      return spawnCli();
+    }
+
+    // Other error — just try once more
+    return spawnCli();
+  }
+
+  const proc = await spawnWithRetry();
   activeRuns.set(sessionKey, { child: proc, requestId, done, resolveDone, isPriority, sender });
 
   if (stream) {
