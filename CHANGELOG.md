@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.6](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.3.5...v0.3.6) (2026-02-13)
+
+
+### Features
+
+* append system prompt on resume to nudge re-reading project instructions after context compaction ([1481c96](https://github.com/alexkirienko/claude-cli-proxy/commit/1481c96))
+
 ## [0.3.5](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.3.4...v0.3.5) (2026-02-06)
 
 
