@@ -256,6 +256,9 @@ async function handleMessages(req, res) {
     // because it overrides the stored prompt and destroys context on resume.
     if (isResume) {
       args.push('--resume', sessionUuid);
+      // Nudge the agent to re-read project instructions after compaction
+      args.push('--append-system-prompt',
+        'Remember: read CLAUDE.md project instructions. Check workspace files (SOUL.md, memory/) if context feels incomplete.');
     } else {
       args.push('--session-id', sessionUuid);
       if (sysText) {
