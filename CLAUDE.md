@@ -7,7 +7,7 @@ HTTP proxy that wraps Claude CLI into an Anthropic-compatible Messages API. Allo
 - **Runtime**: Node.js 18+
 - **Dependencies**: Zero (only Node.js built-ins)
 - **Main file**: `server.js`
-- **Current version**: 0.5.1
+- **Current version**: 0.5.2
 
 ## Run
 
