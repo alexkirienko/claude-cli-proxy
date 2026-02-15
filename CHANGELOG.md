@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.5.1...v0.5.2) (2026-02-15)
+
+
+### Bug Fixes
+
+* create release in same workflow run as PR merge ([85daf58](https://github.com/alexkirienko/claude-cli-proxy/commit/85daf588a76495733d458d64bffef752be2bb8a9))
+
 ## [0.5.1](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.5.0...v0.5.1) (2026-02-15)
 
 
