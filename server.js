@@ -35,6 +35,7 @@ const crypto = require('crypto');
 const HOME = process.env.HOME || os.homedir();
 const WORKSPACE = process.env.CLAUDE_PROXY_WORKSPACE || path.join(HOME, '.claude-proxy', 'workspace');
 const CLAUDE_CONFIG_DIR = path.join(HOME, '.claude'); // real CLI config (auth lives here)
+const DEPLOY_SECRET = process.env.DEPLOY_WEBHOOK_SECRET || '';
 
 // Session management: maps session-key → { uuid, lastUsed }
 const sessions = new Map();
@@ -1195,6 +1196,58 @@ function handleMonitorEvents(req, res) {
   });
 }
 
+/**
+ * Handle GitHub webhook deploy trigger
+ */
+async function handleDeploy(req, res) {
+  let body = '';
+  for await (const chunk of req) body += chunk;
+
+  // Validate HMAC-SHA256 signature
+  if (!DEPLOY_SECRET) {
+    log('[deploy] DEPLOY_WEBHOOK_SECRET not configured');
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'webhook secret not configured' }));
+    return;
+  }
+
+  const sig = req.headers['x-hub-signature-256'] || '';
+  const expected = 'sha256=' + crypto.createHmac('sha256', DEPLOY_SECRET).update(body).digest('hex');
+  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
+    log('[deploy] Invalid webhook signature');
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'invalid signature' }));
+    return;
+  }
+
+  // Only deploy on push to main
+  const event = req.headers['x-github-event'];
+  let payload;
+  try { payload = JSON.parse(body); } catch { payload = {}; }
+
+  if (event === 'push' && payload.ref !== 'refs/heads/main') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'skipped', reason: 'not main branch' }));
+    return;
+  }
+
+  log(`[deploy] Webhook received: ${event} (${(payload.head_commit?.message || '').slice(0, 60)})`);
+
+  // Respond immediately, then run update in background
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ status: 'deploying' }));
+
+  // Spawn update.sh detached — it will git pull + restart the service
+  const updateScript = path.join(__dirname, 'scripts', 'update.sh');
+  const child = spawn('bash', [updateScript], {
+    detached: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stdout.on('data', d => log(`[deploy] ${d.toString().trim()}`));
+  child.stderr.on('data', d => log(`[deploy] stderr: ${d.toString().trim()}`));
+  child.unref();
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
@@ -1248,6 +1301,8 @@ const server = http.createServer(async (req, res) => {
     }));
   } else if (req.method === 'GET' && url.pathname === '/events') {
     handleMonitorEvents(req, res);
+  } else if (req.method === 'POST' && url.pathname === '/deploy') {
+    await handleDeploy(req, res);
   } else {
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: { type: 'not_found', message: 'Not found' } }));
