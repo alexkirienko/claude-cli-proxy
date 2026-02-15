@@ -87,6 +87,9 @@ const IDLE_TIMEOUT_MS = 60 * 1000;          // 60 sec without data = kill child
 const TOOL_IDLE_TIMEOUT_MS = 300 * 1000;    // 5 min during tool execution (CLI runs tools locally)
 const COMPACTION_TIMEOUT_MS = 600 * 1000;    // 10 min during compaction
 
+// Gateway metadata tags to strip from prompts and responses
+const GATEWAY_TAG_RE = /\[\[reply_to_message_id:\s*\d+\]\]\s*/g;
+
 const monitorClients = new Set();
 
 function log(...args) {
@@ -241,7 +244,7 @@ async function handleMessages(req, res) {
   prompt = prompt.trim();
 
   // Strip gateway metadata tags that Claude would echo back
-  prompt = prompt.replace(/\[\[reply_to_message_id:\s*\d+\]\]\s*/g, '');
+  prompt = prompt.replace(GATEWAY_TAG_RE, '');
 
   const sender = parseSender(prompt);
   const isPriority = sender != null;  // any human Telegram message gets priority
@@ -259,6 +262,7 @@ async function handleMessages(req, res) {
     } else if (system.text) {
       sysText = system.text;
     }
+    sysText = sysText.replace(GATEWAY_TAG_RE, '');
   }
 
   // Derive session key from request header or hash of system prompt + first message
@@ -710,6 +714,11 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
         return;
       }
 
+      // Strip gateway metadata tags from outgoing text (may leak from session history)
+      if (delta.type === 'text_delta' && delta.text) {
+        delta = { ...delta, text: delta.text.replace(GATEWAY_TAG_RE, '') };
+      }
+
       // Forward thinking/text deltas with remapped index
       sendSSE(res, 'content_block_delta', {
         type: 'content_block_delta',
@@ -932,7 +941,7 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
         sendSSE(res, 'content_block_delta', {
           type: 'content_block_delta',
           index: sseBlockIndex,
-          delta: { type: 'text_delta', text: e.result }
+          delta: { type: 'text_delta', text: e.result.replace(GATEWAY_TAG_RE, '') }
         });
       }
       return;
@@ -999,7 +1008,7 @@ async function handleNonStreamingResponse(req, res, child, model, requestId, ses
         type: 'message',
         role: 'assistant',
         model: model,
-        content: [{ type: 'text', text: result.result || '' }],
+        content: [{ type: 'text', text: (result.result || '').replace(GATEWAY_TAG_RE, '') }],
         stop_reason: 'end_turn',
         stop_sequence: null,
         usage: {
