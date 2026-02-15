@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.3](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.5.2...v0.5.3) (2026-02-15)
+
+
+### Bug Fixes
+
+* stop manually tracking version in CLAUDE.md ([f5be5f9](https://github.com/alexkirienko/claude-cli-proxy/commit/f5be5f9ec940cb65a86ffce2c61b1e29d3ead974))
+
 ## [0.5.2](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.5.1...v0.5.2) (2026-02-15)
 
 
