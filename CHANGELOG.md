@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.7.0...v0.7.1) (2026-02-15)
+
+
+### Bug Fixes
+
+* clean up temp image files on early exit and catch unhandled exceptions in router ([68f5aa3](https://github.com/alexkirienko/claude-cli-proxy/commit/68f5aa370bd43423afbf97b3580e63b744c4c04d))
+
 ## [0.7.0](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.6.0...v0.7.0) (2026-02-15)
 
 
