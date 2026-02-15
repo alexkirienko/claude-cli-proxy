@@ -240,6 +240,9 @@ async function handleMessages(req, res) {
   }
   prompt = prompt.trim();
 
+  // Strip gateway metadata tags that Claude would echo back
+  prompt = prompt.replace(/\[\[reply_to_message_id:\s*\d+\]\]\s*/g, '');
+
   const sender = parseSender(prompt);
   const isPriority = sender != null;  // any human Telegram message gets priority
 
