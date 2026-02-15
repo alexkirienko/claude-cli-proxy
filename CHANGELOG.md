@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.5.9...v0.6.0) (2026-02-15)
+
+
+### Features
+
+* add multimodal image support and session regeneration ([aaa7852](https://github.com/alexkirienko/claude-cli-proxy/commit/aaa78522fbdfd3eeaadb88b582dc22deaf343fb5))
+
 ## [0.5.9](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.5.8...v0.5.9) (2026-02-15)
 
 
