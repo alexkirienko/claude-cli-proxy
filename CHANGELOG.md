@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.4](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.5.3...v0.5.4) (2026-02-15)
+
+
+### Bug Fixes
+
+* add tests for session isolation and CLAUDE_CONFIG_DIR ([e3eb6f5](https://github.com/alexkirienko/claude-cli-proxy/commit/e3eb6f5fd24b7c3c91870b683d91bb63c7ccf175))
+
 ## [0.5.3](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.5.2...v0.5.3) (2026-02-15)
 
 
