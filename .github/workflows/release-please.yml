@@ -18,9 +18,9 @@ jobs:
         with:
           release-type: node
 
-      # Auto-merge and the merge commit triggers release on next push.
-      # But GITHUB_TOKEN merges don't trigger workflows, so we merge
-      # AND handle the release in the same run.
+      # Auto-merge: release-please creates the PR, we merge it immediately.
+      # On the NEXT push, release-please detects the merged PR and creates
+      # the GitHub release — all in the same workflow run.
       - name: Auto-merge release PR
         if: steps.release.outputs.prs_created == 'true'
         env:
@@ -28,16 +28,3 @@ jobs:
         run: |
           PR_NUMBER=$(echo '${{ steps.release.outputs.prs }}' | jq -r '.[0].number')
           gh pr merge "$PR_NUMBER" --merge -R ${{ github.repository }}
-
-          # Wait for merge to complete
-          sleep 5
-
-          # Extract version from the PR title (e.g. "chore(main): release 0.5.1")
-          VERSION=$(gh pr view "$PR_NUMBER" -R ${{ github.repository }} --json title -q '.title' | grep -oP '\d+\.\d+\.\d+')
-          TAG="v${VERSION}"
-
-          # Create the release directly since the merge commit won't trigger another run
-          if ! gh release view "$TAG" -R ${{ github.repository }} &>/dev/null; then
-            CHANGELOG=$(gh pr view "$PR_NUMBER" -R ${{ github.repository }} --json body -q '.body' | sed -n '/^## \[/,/^---/p' | head -n -1)
-            gh release create "$TAG" --title "$TAG" --notes "$CHANGELOG" -R ${{ github.repository }}
-          fi
