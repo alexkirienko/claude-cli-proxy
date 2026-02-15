@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.5](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.5.4...v0.5.5) (2026-02-15)
+
+
+### Bug Fixes
+
+* clear JSONL before retry to prevent "already in use" loop ([a38e62b](https://github.com/alexkirienko/claude-cli-proxy/commit/a38e62b3421b80f056716d0ac723e6bfe895c4b9))
+
 ## [0.5.4](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.5.3...v0.5.4) (2026-02-15)
 
 
