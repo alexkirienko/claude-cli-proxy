@@ -1142,7 +1142,8 @@ if (require.main === module) {
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
   server.listen(PORT, '127.0.0.1', () => {
-    log(`Claude CLI Proxy v2.0 running on http://127.0.0.1:${PORT}`);
+    const pkg = require('./package.json');
+    log(`Claude CLI Proxy v${pkg.version} running on http://127.0.0.1:${PORT}`);
     log(`Claude path: ${CLAUDE_PATH}`);
     log(`Features: streaming, tool_use, thinking, monitoring`);
     log(`Endpoints:`);
