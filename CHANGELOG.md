@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.6.0...v0.7.0) (2026-02-15)
+
+
+### Features
+
+* add /deploy webhook endpoint for GitHub-triggered auto-deploy ([bd65cb0](https://github.com/alexkirienko/claude-cli-proxy/commit/bd65cb04ae9952238660204893b05150a7ace153))
+
 ## [0.6.0](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.5.9...v0.6.0) (2026-02-15)
 
 
