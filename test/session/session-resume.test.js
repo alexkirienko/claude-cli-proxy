@@ -24,11 +24,13 @@ describe('Session: resume logic', () => {
   it('first request uses --session-id, second uses --resume', async () => {
     const { request } = require('../helpers/test-server');
     const spawnArgs = [];
+    const spawnOpts = [];
     let spawnCount = 0;
 
-    spawnHandler = (cmd, args) => {
+    spawnHandler = (cmd, args, opts) => {
       spawnCount++;
       spawnArgs.push([...args]);
+      spawnOpts.push(opts);
       if (spawnCount % 2 === 1) {
         // First spawn exits quickly -> triggers retry
         return createMockChild({ exitCode: 0, autoClose: true, closeDelay: 5 });
@@ -100,6 +102,23 @@ describe('Session: resume logic', () => {
       !realArgs2.includes('--session-id'),
       'second request does not use --session-id'
     );
+
+    // Verify CLAUDE_CONFIG_DIR is set in spawn env for session isolation
+    const realOpts = spawnOpts[1]; // retry spawn opts
+    assert.ok(realOpts?.env?.CLAUDE_CONFIG_DIR,
+      'CLAUDE_CONFIG_DIR is set in spawn env');
+    assert.ok(realOpts.env.CLAUDE_CONFIG_DIR.includes('.claude-proxy'),
+      'CLAUDE_CONFIG_DIR points to .claude-proxy (not ~/.claude)');
+
+    // Verify cwd uses WORKSPACE (not hardcoded path)
+    assert.ok(realOpts.cwd,
+      'cwd is set in spawn opts');
+    assert.ok(!realOpts.cwd.includes('/home/alex/.openclaw'),
+      'cwd does not use hardcoded /home/alex/.openclaw path');
+
+    // Verify ANTHROPIC_API_KEY is removed
+    assert.strictEqual(realOpts.env.ANTHROPIC_API_KEY, undefined,
+      'ANTHROPIC_API_KEY is removed from spawn env');
 
     internals.sessions.delete('test-resume-session');
   });

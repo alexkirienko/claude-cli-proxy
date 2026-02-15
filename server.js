@@ -1168,6 +1168,7 @@ module.exports = {
   _server: server,
   _internals: {
     sessions, activeRuns, sessionQueues, monitorClients,
-    IDLE_TIMEOUT_MS, TOOL_IDLE_TIMEOUT_MS, COMPACTION_TIMEOUT_MS, SESSION_TTL_MS
+    IDLE_TIMEOUT_MS, TOOL_IDLE_TIMEOUT_MS, COMPACTION_TIMEOUT_MS, SESSION_TTL_MS,
+    WORKSPACE, CLAUDE_CONFIG, CLAUDE_PATH, HOME
   }
 };
