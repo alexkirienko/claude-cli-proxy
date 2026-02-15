@@ -25,5 +25,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PR_NUMBER=$(echo '${{ steps.release.outputs.prs }}' | jq -r '.[0].number')
-          gh pr review "$PR_NUMBER" --approve -R ${{ github.repository }}
-          gh pr merge "$PR_NUMBER" --merge --auto -R ${{ github.repository }}
+          gh pr merge "$PR_NUMBER" --merge -R ${{ github.repository }}
