@@ -699,7 +699,7 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
 
     // Forward content_block_delta events
     if (e.type === 'content_block_delta') {
-      const delta = e.delta;
+      let delta = e.delta;
 
       // Filter tool_use deltas — don't forward to gateway
       if (insideToolUseBlock) {
