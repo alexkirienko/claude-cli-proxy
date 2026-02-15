@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.4.0...v0.5.0) (2026-02-15)
+
+
+### Features
+
+* session isolation and self-update ([b86ae9a](https://github.com/alexkirienko/claude-cli-proxy/commit/b86ae9a7c2a6126ff87781e79572fd885fdbab8d))
+
 ## [0.4.0](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.3.1...v0.4.0) (2026-02-15)
 
 
