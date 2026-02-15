@@ -30,7 +30,7 @@ describe('GET /health', () => {
 
   it('body has features array with exactly the expected entries', async () => {
     const res = await request(`${url}/health`);
-    assert.deepEqual(res.json.features, ['streaming', 'tool_use', 'thinking', 'monitoring']);
+    assert.deepEqual(res.json.features, ['streaming', 'tool_use', 'thinking', 'monitoring', 'images', 'regenerate']);
   });
 
   it('body has monitorClients as a number', async () => {

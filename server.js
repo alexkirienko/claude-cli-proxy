@@ -26,12 +26,13 @@ const fs = require('fs');
 const path = require('path');
 const { spawn, execSync } = require('child_process');
 const { URL } = require('url');
+const os = require('os');
 
 const PORT = parseInt(process.env.CLAUDE_PROXY_PORT || process.argv.find((_, i, a) => a[i-1] === '--port') || '8787', 10);
 const CLAUDE_PATH = process.env.CLAUDE_PATH || 'claude';
 const DEBUG = process.env.DEBUG === '1';
 const crypto = require('crypto');
-const HOME = process.env.HOME || require('os').homedir();
+const HOME = process.env.HOME || os.homedir();
 const WORKSPACE = process.env.CLAUDE_PROXY_WORKSPACE || path.join(HOME, '.claude-proxy', 'workspace');
 const CLAUDE_CONFIG_DIR = path.join(HOME, '.claude'); // real CLI config (auth lives here)
 
@@ -153,6 +154,89 @@ function mapModelName(model) {
 }
 
 /**
+ * Extract base64 images from content array, write to temp files,
+ * return file paths to append to prompt (matching OpenClaw's CLI backend pattern).
+ */
+function writeImagesToTmp(contentBlocks, requestId) {
+  const images = contentBlocks.filter(c =>
+    c.type === 'image' && c.source?.type === 'base64' && c.source?.data
+  );
+  if (images.length === 0) return [];
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-proxy-img-'));
+  const paths = [];
+
+  for (let i = 0; i < images.length; i++) {
+    const img = images[i];
+    const ext = (img.source.media_type || 'image/png').split('/')[1] || 'png';
+    const filePath = path.join(tmpDir, `image-${i + 1}.${ext}`);
+    fs.writeFileSync(filePath, Buffer.from(img.source.data, 'base64'));
+    paths.push(filePath);
+    debug(`[${requestId}] Wrote image ${i + 1}: ${filePath} (${img.source.media_type})`);
+  }
+
+  return paths;
+}
+
+/**
+ * Truncate a session JSONL to remove the last user turn and all descendants.
+ * Returns the path to the new truncated JSONL, or null if truncation is not possible.
+ */
+function truncateSessionForRegenerate(jsonlPath, newUuid, cwdSlug) {
+  let content;
+  try {
+    content = fs.readFileSync(jsonlPath, 'utf-8');
+  } catch {
+    return null;
+  }
+  const lines = content.split('\n').filter(Boolean);
+  const entries = lines.map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+
+  // Find the last real user message (not tool_result, not compact summary)
+  let lastUserIdx = -1;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e.type === 'user' && e.message?.role === 'user' && !e.isCompactSummary) {
+      // Check if it's a tool_result array — skip those
+      if (Array.isArray(e.message.content)
+          && e.message.content.every(c => c.type === 'tool_result')) {
+        continue;
+      }
+      lastUserIdx = i;
+      break;
+    }
+  }
+
+  if (lastUserIdx <= 0) return null; // nothing to truncate
+
+  // Collect UUIDs to remove: the user message and all descendants
+  const lastUserUuid = entries[lastUserIdx].uuid;
+  const toRemove = new Set();
+  toRemove.add(lastUserUuid);
+
+  // Walk forward, removing any entry whose parentUuid is in toRemove
+  for (let i = lastUserIdx + 1; i < entries.length; i++) {
+    if (toRemove.has(entries[i].parentUuid)) {
+      toRemove.add(entries[i].uuid);
+    }
+  }
+
+  // Also remove the file-history-snapshot immediately before the user message
+  if (lastUserIdx > 0 && entries[lastUserIdx - 1].type === 'file-history-snapshot') {
+    toRemove.add(entries[lastUserIdx - 1].uuid);
+  }
+
+  // Build truncated JSONL in a new file (preserves original for safety)
+  const kept = entries.filter(e => !toRemove.has(e.uuid));
+  const newPath = path.join(
+    CLAUDE_CONFIG_DIR, 'projects', cwdSlug, `${newUuid}.jsonl`
+  );
+  fs.mkdirSync(path.dirname(newPath), { recursive: true });
+  fs.writeFileSync(newPath, kept.map(e => JSON.stringify(e)).join('\n') + '\n');
+  return newPath;
+}
+
+/**
  * Extract complete JSON objects from a buffer using brace counting.
  * Returns { objects: parsed[], remainder: string }
  */
@@ -235,11 +319,18 @@ async function handleMessages(req, res) {
 
   // Extract ONLY the last user message (gateway already provides conversation context in it)
   let prompt = '';
+  let imagePaths = [];
   if (typeof lastUserMsg.content === 'string') {
     prompt = lastUserMsg.content;
   } else if (Array.isArray(lastUserMsg.content)) {
     prompt = lastUserMsg.content
       .filter(c => c.type === 'text').map(c => c.text).join('\n');
+
+    // Extract base64 images to temp files, append paths to prompt
+    imagePaths = writeImagesToTmp(lastUserMsg.content, requestId);
+    if (imagePaths.length > 0) {
+      prompt += '\n\n' + imagePaths.join('\n');
+    }
   }
   prompt = prompt.trim();
 
@@ -271,14 +362,27 @@ async function handleMessages(req, res) {
     : (messages[0]?.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
   const sessionKey = req.headers['x-session-key']
     || crypto.createHash('md5').update((sysText || 'default') + '|' + firstMsgText.slice(0, 200)).digest('hex');
-  const sessionUuid = sessionKeyToUuid(sessionKey);
+  // Use stored UUID if session was forked (regen), else deterministic from key
+  let sessionUuid = sessions.get(sessionKey)?.uuid || sessionKeyToUuid(sessionKey);
   // Check both in-memory map AND on-disk JSONL to survive proxy restarts
   const cwdSlug = WORKSPACE.replace(/[/.]/g, '-');
-  const sessionJsonlPath = path.join(
+  let sessionJsonlPath = path.join(
     CLAUDE_CONFIG_DIR, 'projects', cwdSlug,
     `${sessionUuid}.jsonl`
   );
   let isResume = sessions.has(sessionKey) || fs.existsSync(sessionJsonlPath);
+
+  // Session regeneration: fork to new UUID with truncated history
+  const isRegenerate = req.headers['x-regenerate'] === 'true';
+  if (isRegenerate && isResume) {
+    const regenUuid = sessionKeyToUuid(sessionKey + ':regen:' + Date.now());
+    const truncatedPath = truncateSessionForRegenerate(sessionJsonlPath, regenUuid, cwdSlug);
+    if (truncatedPath) {
+      sessionUuid = regenUuid;
+      sessionJsonlPath = truncatedPath;
+      debug(`[${requestId}] Regenerating: forked session to ${regenUuid.slice(0, 8)}`);
+    }
+  }
 
   // Map model names
   let cliModel = mapModelName(model);
@@ -460,16 +564,16 @@ async function handleMessages(req, res) {
   activeRuns.set(sessionKey, { child: proc, requestId, done, resolveDone, isPriority, sender });
 
   if (stream) {
-    await handleStreamingResponse(req, res, proc, model, requestId, sessionKey);
+    await handleStreamingResponse(req, res, proc, model, requestId, sessionKey, imagePaths, sessionUuid);
   } else {
-    await handleNonStreamingResponse(req, res, proc, model, requestId, sessionKey);
+    await handleNonStreamingResponse(req, res, proc, model, requestId, sessionKey, imagePaths, sessionUuid);
   }
 }
 
 /**
  * Handle streaming response with full Anthropic event compatibility
  */
-async function handleStreamingResponse(req, res, child, model, requestId, sessionKey) {
+async function handleStreamingResponse(req, res, child, model, requestId, sessionKey, imagePaths, sessionUuid) {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -583,10 +687,16 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
       }
     }
 
-    // Track session on success
+    // Track session on success (use actual sessionUuid, which may be a regen fork)
     if (code === 0 && sessionKey) {
-      sessions.set(sessionKey, { uuid: sessionKeyToUuid(sessionKey), lastUsed: Date.now() });
+      sessions.set(sessionKey, { uuid: sessionUuid, lastUsed: Date.now() });
       log(`[${requestId}] Session saved: ${sessionKey.slice(0, 8)}... (${sessions.size} active)`);
+    }
+
+    // Clean up temp image files
+    if (imagePaths && imagePaths.length > 0) {
+      const tmpDir = path.dirname(imagePaths[0]);
+      fs.rm(tmpDir, { recursive: true, force: true }, () => {});
     }
 
     // Close any open non-tool_use content blocks visible to gateway
@@ -952,7 +1062,7 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
 /**
  * Handle non-streaming response
  */
-async function handleNonStreamingResponse(req, res, child, model, requestId, sessionKey) {
+async function handleNonStreamingResponse(req, res, child, model, requestId, sessionKey, imagePaths, sessionUuid) {
   let stdout = '';
   let stderr = '';
 
@@ -973,10 +1083,16 @@ async function handleNonStreamingResponse(req, res, child, model, requestId, ses
       }
     }
 
-    // Track session on success
+    // Track session on success (use actual sessionUuid, which may be a regen fork)
     if (code === 0 && sessionKey) {
-      sessions.set(sessionKey, { uuid: sessionKeyToUuid(sessionKey), lastUsed: Date.now() });
+      sessions.set(sessionKey, { uuid: sessionUuid, lastUsed: Date.now() });
       log(`[${requestId}] Session saved: ${sessionKey.slice(0, 8)}... (${sessions.size} active)`);
+    }
+
+    // Clean up temp image files
+    if (imagePaths && imagePaths.length > 0) {
+      const tmpDir = path.dirname(imagePaths[0]);
+      fs.rm(tmpDir, { recursive: true, force: true }, () => {});
     }
 
     // Try to parse JSON output regardless of exit code
@@ -1085,7 +1201,7 @@ const server = http.createServer(async (req, res) => {
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, anthropic-version, x-api-key, x-session-key');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, anthropic-version, x-api-key, x-session-key, x-regenerate');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -1127,7 +1243,7 @@ const server = http.createServer(async (req, res) => {
       status: 'ok',
       claude: CLAUDE_PATH,
       version: cliVersion,
-      features: ['streaming', 'tool_use', 'thinking', 'monitoring'],
+      features: ['streaming', 'tool_use', 'thinking', 'monitoring', 'images', 'regenerate'],
       monitorClients: monitorClients.size
     }));
   } else if (req.method === 'GET' && url.pathname === '/events') {
@@ -1164,7 +1280,7 @@ if (require.main === module) {
     const pkg = require('./package.json');
     log(`Claude CLI Proxy v${pkg.version} running on http://127.0.0.1:${PORT}`);
     log(`Claude path: ${CLAUDE_PATH}`);
-    log(`Features: streaming, tool_use, thinking, monitoring`);
+    log(`Features: streaming, tool_use, thinking, monitoring, images, regenerate`);
     log(`Endpoints:`);
     log(`  POST /v1/messages  - Anthropic Messages API`);
     log(`  GET  /v1/models    - List models`);
@@ -1175,7 +1291,8 @@ if (require.main === module) {
 
 module.exports = {
   parseSender, sessionKeyToUuid, generateMessageId,
-  extractJsonObjects, mapModelName, gracefulShutdown,
+  extractJsonObjects, mapModelName, writeImagesToTmp,
+  truncateSessionForRegenerate, gracefulShutdown,
   _server: server,
   _internals: {
     sessions, activeRuns, sessionQueues, monitorClients,
