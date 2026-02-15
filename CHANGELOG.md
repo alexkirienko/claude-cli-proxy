@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.2](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.7.1...v0.7.2) (2026-02-15)
+
+
+### Bug Fixes
+
+* define cleanupImages in streaming/non-streaming handler scope ([cd87a34](https://github.com/alexkirienko/claude-cli-proxy/commit/cd87a349a850eb5af5ac4e4167e2144090d17e25))
+
 ## [0.7.1](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.7.0...v0.7.1) (2026-02-15)
 
 
