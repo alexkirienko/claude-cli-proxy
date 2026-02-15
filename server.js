@@ -55,22 +55,26 @@ function sessionKeyToUuid(key) {
           '8'+hash.slice(17,20), hash.slice(20,32)].join('-');
 }
 
-// Periodic cleanup every 10 minutes
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, info] of sessions) {
-    if (now - info.lastUsed > SESSION_TTL_MS) {
-      log(`[session] Evicting expired session: ${key.slice(0, 8)}...`);
-      sessions.delete(key);
+// Periodic cleanup every 10 minutes (only when running as main)
+if (require.main === module) {
+  setInterval(() => {
+    const now = Date.now();
+    for (const [key, info] of sessions) {
+      if (now - info.lastUsed > SESSION_TTL_MS) {
+        log(`[session] Evicting expired session: ${key.slice(0, 8)}...`);
+        sessions.delete(key);
+      }
     }
-  }
-}, 600_000);
+  }, 600_000);
+}
 
-// Detect Claude CLI version at startup
+// Detect Claude CLI version at startup (only when running as main)
 let cliVersion = 'unknown';
-try {
-  cliVersion = execSync(`${CLAUDE_PATH} --version 2>/dev/null`, { timeout: 5000 }).toString().trim();
-} catch {}
+if (require.main === module) {
+  try {
+    cliVersion = execSync(`${CLAUDE_PATH} --version 2>/dev/null`, { timeout: 5000 }).toString().trim();
+  } catch {}
+}
 
 // Timeout constants
 const IDLE_TIMEOUT_MS = 60 * 1000;          // 60 sec without data = kill child
@@ -120,6 +124,74 @@ function sendSSE(res, eventType, data) {
 
   // Also emit to monitoring
   emitMonitorEvent('sse_out', { eventType, data });
+}
+
+/**
+ * Map model name to CLI model flag
+ */
+function mapModelName(model) {
+  let cliModel = model
+    .replace(/^anthropic\//, '')
+    .replace(/^claude-cli\//, '')
+    .replace(/-20\d{6}$/, ''); // Remove date suffix
+
+  // Common aliases - map to Claude Max plan model flags
+  if (cliModel.includes('opus')) cliModel = 'opus';
+  else if (cliModel.includes('sonnet')) cliModel = 'sonnet';
+  else if (cliModel.includes('haiku')) cliModel = 'haiku';
+
+  return cliModel;
+}
+
+/**
+ * Extract complete JSON objects from a buffer using brace counting.
+ * Returns { objects: parsed[], remainder: string }
+ */
+function extractJsonObjects(buffer) {
+  const objects = [];
+  let startIndex = 0;
+  let braceCount = 0;
+  let inString = false;
+  let escapeNext = false;
+
+  for (let i = 0; i < buffer.length; i++) {
+    const char = buffer[i];
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (char === '\\' && inString) {
+      escapeNext = true;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (!inString) {
+      if (char === '{') {
+        if (braceCount === 0) startIndex = i;
+        braceCount++;
+      } else if (char === '}') {
+        braceCount--;
+        if (braceCount === 0) {
+          const jsonStr = buffer.slice(startIndex, i + 1);
+          try {
+            objects.push(JSON.parse(jsonStr));
+          } catch (e) {
+            // Skip unparseable JSON
+          }
+          startIndex = i + 1;
+        }
+      }
+    }
+  }
+
+  return { objects, remainder: buffer.slice(startIndex) };
 }
 
 /**
@@ -196,15 +268,7 @@ async function handleMessages(req, res) {
   let isResume = sessions.has(sessionKey) || fs.existsSync(sessionJsonlPath);
 
   // Map model names
-  let cliModel = model
-    .replace(/^anthropic\//, '')
-    .replace(/^claude-cli\//, '')
-    .replace(/-20\d{6}$/, ''); // Remove date suffix
-
-  // Common aliases - map to Claude Max plan model flags
-  if (cliModel.includes('opus')) cliModel = 'opus';
-  else if (cliModel.includes('sonnet')) cliModel = 'sonnet';
-  else if (cliModel.includes('haiku')) cliModel = 'haiku';
+  let cliModel = mapModelName(model);
 
   debug('Model:', model, '->', cliModel);
   debug('Prompt length:', prompt.length);
@@ -473,59 +537,17 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
     resetIdleTimeout();  // Reset idle timeout on each data chunk
     buffer += data.toString();
 
-    // Extract complete JSON objects from buffer using brace counting
-    // This handles concatenated JSON (no newline between objects) correctly
-    let startIndex = 0;
-    let braceCount = 0;
-    let inString = false;
-    let escapeNext = false;
+    const { objects, remainder } = extractJsonObjects(buffer);
+    buffer = remainder;
 
-    for (let i = 0; i < buffer.length; i++) {
-      const char = buffer[i];
-
-      if (escapeNext) {
-        escapeNext = false;
-        continue;
-      }
-
-      if (char === '\\' && inString) {
-        escapeNext = true;
-        continue;
-      }
-
-      if (char === '"') {
-        inString = !inString;
-        continue;
-      }
-
-      if (!inString) {
-        if (char === '{') {
-          if (braceCount === 0) startIndex = i;
-          braceCount++;
-        } else if (char === '}') {
-          braceCount--;
-          if (braceCount === 0) {
-            // Complete JSON object found
-            const jsonStr = buffer.slice(startIndex, i + 1);
-            try {
-              const event = JSON.parse(jsonStr);
-              // Handle raw events (new in 2.1.29) or wrapped stream_event (Phase 1)
-              if (event.type === 'stream_event' && event.event) {
-                processStreamEvent(event.event, res, state, contentBlocks, messageId, model, requestId);
-              } else {
-                processStreamEvent(event, res, state, contentBlocks, messageId, model, requestId);
-              }
-            } catch (e) {
-              log(`[${requestId}] JSON parse error: ${e.message}, json: ${jsonStr.slice(0, 100)}`);
-            }
-            startIndex = i + 1;
-          }
-        }
+    for (const event of objects) {
+      // Handle raw events (new in 2.1.29) or wrapped stream_event (Phase 1)
+      if (event.type === 'stream_event' && event.event) {
+        processStreamEvent(event.event, res, state, contentBlocks, messageId, model, requestId);
+      } else {
+        processStreamEvent(event, res, state, contentBlocks, messageId, model, requestId);
       }
     }
-
-    // Keep unparsed remainder in buffer (incomplete JSON or whitespace/newlines before next object)
-    buffer = buffer.slice(startIndex);
   });
 
   child.stderr.on('data', (data) => {
@@ -1115,16 +1137,28 @@ function gracefulShutdown(signal) {
   }
   setTimeout(() => process.exit(0), 2000);
 }
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+if (require.main === module) {
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-server.listen(PORT, '127.0.0.1', () => {
-  log(`Claude CLI Proxy v2.0 running on http://127.0.0.1:${PORT}`);
-  log(`Claude path: ${CLAUDE_PATH}`);
-  log(`Features: streaming, tool_use, thinking, monitoring`);
-  log(`Endpoints:`);
-  log(`  POST /v1/messages  - Anthropic Messages API`);
-  log(`  GET  /v1/models    - List models`);
-  log(`  GET  /health       - Health check`);
-  log(`  GET  /events       - SSE monitoring stream`);
-});
+  server.listen(PORT, '127.0.0.1', () => {
+    log(`Claude CLI Proxy v2.0 running on http://127.0.0.1:${PORT}`);
+    log(`Claude path: ${CLAUDE_PATH}`);
+    log(`Features: streaming, tool_use, thinking, monitoring`);
+    log(`Endpoints:`);
+    log(`  POST /v1/messages  - Anthropic Messages API`);
+    log(`  GET  /v1/models    - List models`);
+    log(`  GET  /health       - Health check`);
+    log(`  GET  /events       - SSE monitoring stream`);
+  });
+}
+
+module.exports = {
+  parseSender, sessionKeyToUuid, generateMessageId,
+  extractJsonObjects, mapModelName, gracefulShutdown,
+  _server: server,
+  _internals: {
+    sessions, activeRuns, sessionQueues, monitorClients,
+    IDLE_TIMEOUT_MS, TOOL_IDLE_TIMEOUT_MS, COMPACTION_TIMEOUT_MS, SESSION_TTL_MS
+  }
+};
