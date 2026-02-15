@@ -15,6 +15,7 @@
     "start:debug": "DEBUG=1 node server.js",
     "test": "node --test test/**/*.test.js",
     "test:unit": "node --test test/unit/*.test.js",
-    "test:coverage": "node --test --experimental-test-coverage test/**/*.test.js"
+    "test:coverage": "node --test --experimental-test-coverage test/**/*.test.js",
+    "update": "bash scripts/update.sh"
   }
 }

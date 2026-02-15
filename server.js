@@ -28,9 +28,12 @@ const { spawn, execSync } = require('child_process');
 const { URL } = require('url');
 
 const PORT = parseInt(process.env.CLAUDE_PROXY_PORT || process.argv.find((_, i, a) => a[i-1] === '--port') || '8787', 10);
-const CLAUDE_PATH = process.env.CLAUDE_PATH || '/home/alex/.local/bin/claude';
+const CLAUDE_PATH = process.env.CLAUDE_PATH || 'claude';
 const DEBUG = process.env.DEBUG === '1';
 const crypto = require('crypto');
+const HOME = process.env.HOME || require('os').homedir();
+const WORKSPACE = process.env.CLAUDE_PROXY_WORKSPACE || path.join(HOME, '.claude-proxy', 'workspace');
+const CLAUDE_CONFIG = path.join(HOME, '.claude-proxy', 'config');
 
 // Session management: maps session-key → { uuid, lastUsed }
 const sessions = new Map();
@@ -71,6 +74,10 @@ if (require.main === module) {
 // Detect Claude CLI version at startup (only when running as main)
 let cliVersion = 'unknown';
 if (require.main === module) {
+  // Ensure proxy directories exist (separate from user's ~/.claude)
+  fs.mkdirSync(WORKSPACE, { recursive: true });
+  fs.mkdirSync(CLAUDE_CONFIG, { recursive: true });
+
   try {
     cliVersion = execSync(`${CLAUDE_PATH} --version 2>/dev/null`, { timeout: 5000 }).toString().trim();
   } catch {}
@@ -260,9 +267,9 @@ async function handleMessages(req, res) {
     || crypto.createHash('md5').update((sysText || 'default') + '|' + firstMsgText.slice(0, 200)).digest('hex');
   const sessionUuid = sessionKeyToUuid(sessionKey);
   // Check both in-memory map AND on-disk JSONL to survive proxy restarts
-  const cwdSlug = '/home/alex/.openclaw/workspace'.replace(/[/.]/g, '-');
+  const cwdSlug = WORKSPACE.replace(/[/.]/g, '-');
   const sessionJsonlPath = path.join(
-    process.env.HOME || '/home/alex', '.claude', 'projects', cwdSlug,
+    CLAUDE_CONFIG, 'projects', cwdSlug,
     `${sessionUuid}.jsonl`
   );
   let isResume = sessions.has(sessionKey) || fs.existsSync(sessionJsonlPath);
@@ -348,10 +355,11 @@ async function handleMessages(req, res) {
 
     const env = { ...process.env };
     delete env.ANTHROPIC_API_KEY;
+    env.CLAUDE_CONFIG_DIR = CLAUDE_CONFIG;
 
     const child = spawn(CLAUDE_PATH, args, {
       env,
-      cwd: '/home/alex/.openclaw/workspace',
+      cwd: WORKSPACE,
       stdio: ['pipe', 'pipe', 'pipe']
     });
 

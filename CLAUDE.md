@@ -21,7 +21,8 @@ npm run start:debug      # With debug logging (DEBUG=1)
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `CLAUDE_PROXY_PORT` | `8787` | Server port |
-| `CLAUDE_PATH` | `~/.local/bin/claude` | Path to Claude CLI |
+| `CLAUDE_PATH` | `claude` | Path to Claude CLI |
+| `CLAUDE_PROXY_WORKSPACE` | `~/.claude-proxy/workspace` | Working directory for CLI |
 | `DEBUG` | (unset) | `1` for verbose logging |
 
 ## Service (systemd)
