@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.5.0...v0.5.1) (2026-02-15)
+
+
+### Bug Fixes
+
+* use direct merge instead of --auto for release-please PRs ([342f2b7](https://github.com/alexkirienko/claude-cli-proxy/commit/342f2b7cae2907119ae67cc885a4d90ad0d770f3))
+
 ## [0.5.0](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.4.0...v0.5.0) (2026-02-15)
 
 
