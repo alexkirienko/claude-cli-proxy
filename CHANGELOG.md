@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.9](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.5.8...v0.5.9) (2026-02-15)
+
+
+### Bug Fixes
+
+* const-to-let for delta reassignment in streaming handler ([96c365b](https://github.com/alexkirienko/claude-cli-proxy/commit/96c365b4d6ae2ccc239944bfc49def6333aa9cf4))
+
 ## [0.5.8](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.5.7...v0.5.8) (2026-02-15)
 
 
