@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.4.0](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.3.1...v0.4.0) (2026-02-15)
+
+
+### Features
+
+* add comprehensive test suite with 104 tests (93% coverage) ([a026a2f](https://github.com/alexkirienko/claude-cli-proxy/commit/a026a2fd9f1e5dfec48e61e75a5d91f5293e18cc))
+* append system prompt on resume to nudge re-reading project instructions ([1481c96](https://github.com/alexkirienko/claude-cli-proxy/commit/1481c961f05109ba7a66c3e41f8436c606761a64))
+
+
+### Bug Fixes
+
+* bump package.json version to 0.3.6 to match changelog ([fdd6c84](https://github.com/alexkirienko/claude-cli-proxy/commit/fdd6c844a89c6d8f9d9ed7da059c6b106a450d58))
+* detect existing session JSONL on disk to survive proxy restarts ([454d0e0](https://github.com/alexkirienko/claude-cli-proxy/commit/454d0e007482f5b7ac867e4b9170f9eb243e0a49))
+* kill zombie CLI processes when gateway aborts a run ([6830e90](https://github.com/alexkirienko/claude-cli-proxy/commit/6830e902f9c66bda04dee939510dbaf8f2f4405c))
+* read version from package.json instead of hardcoded "v2.0" ([6af9068](https://github.com/alexkirienko/claude-cli-proxy/commit/6af9068f96445f7eb2791ad825e2b13a31ba67e0))
+* skip --system-prompt on --resume to preserve session context ([6172c2c](https://github.com/alexkirienko/claude-cli-proxy/commit/6172c2ce1e6445b4a33ed868d73c49e1c5709fdc))
+* use --resume for session continuity, only clear JSONL on lock error ([e32429a](https://github.com/alexkirienko/claude-cli-proxy/commit/e32429a288176efe88c11643e800b80dd1f6c597))
+
 ## [0.3.6](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.3.5...v0.3.6) (2026-02-13)
 
 
