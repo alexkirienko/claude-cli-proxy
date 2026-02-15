@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.6](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.5.5...v0.5.6) (2026-02-15)
+
+
+### Bug Fixes
+
+* remove CLAUDE_CONFIG_DIR override that broke CLI authentication ([d7e9cc6](https://github.com/alexkirienko/claude-cli-proxy/commit/d7e9cc62efaf6f5473b9896b4f59dcc92febc68b))
+
 ## [0.5.5](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.5.4...v0.5.5) (2026-02-15)
 
 
