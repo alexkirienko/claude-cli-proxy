@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.7](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.5.6...v0.5.7) (2026-02-15)
+
+
+### Bug Fixes
+
+* strip [[reply_to_message_id: N]] tags from prompts ([f24eab4](https://github.com/alexkirienko/claude-cli-proxy/commit/f24eab424f017ac455f20423b477e414eaeaf638))
+
 ## [0.5.6](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.5.5...v0.5.6) (2026-02-15)
 
 
