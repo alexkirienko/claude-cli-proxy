@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.8](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.5.7...v0.5.8) (2026-02-15)
+
+
+### Bug Fixes
+
+* strip gateway metadata tags from responses too ([834f352](https://github.com/alexkirienko/claude-cli-proxy/commit/834f3525e1d3ee04c8c669d40b26a7f980a22b1e))
+
 ## [0.5.7](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.5.6...v0.5.7) (2026-02-15)
 
 
