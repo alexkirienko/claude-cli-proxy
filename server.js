@@ -446,7 +446,8 @@ async function handleMessages(req, res) {
       return spawnCli();
     }
 
-    // Other error — just try once more
+    // Other error — clear JSONL (first spawn may have created it) and try once more
+    clearSessionLock();
     return spawnCli();
   }
 
