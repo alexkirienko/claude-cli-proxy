@@ -103,12 +103,10 @@ describe('Session: resume logic', () => {
       'second request does not use --session-id'
     );
 
-    // Verify CLAUDE_CONFIG_DIR is set in spawn env for session isolation
+    // Verify CLAUDE_CONFIG_DIR is NOT overridden (CLI uses default ~/.claude for auth)
     const realOpts = spawnOpts[1]; // retry spawn opts
-    assert.ok(realOpts?.env?.CLAUDE_CONFIG_DIR,
-      'CLAUDE_CONFIG_DIR is set in spawn env');
-    assert.ok(realOpts.env.CLAUDE_CONFIG_DIR.includes('.claude-proxy'),
-      'CLAUDE_CONFIG_DIR points to .claude-proxy (not ~/.claude)');
+    assert.strictEqual(realOpts?.env?.CLAUDE_CONFIG_DIR, undefined,
+      'CLAUDE_CONFIG_DIR must not be set (CLI uses ~/.claude for auth)');
 
     // Verify cwd uses WORKSPACE (not hardcoded path)
     assert.ok(realOpts.cwd,

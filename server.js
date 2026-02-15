@@ -33,7 +33,7 @@ const DEBUG = process.env.DEBUG === '1';
 const crypto = require('crypto');
 const HOME = process.env.HOME || require('os').homedir();
 const WORKSPACE = process.env.CLAUDE_PROXY_WORKSPACE || path.join(HOME, '.claude-proxy', 'workspace');
-const CLAUDE_CONFIG = path.join(HOME, '.claude-proxy', 'config');
+const CLAUDE_CONFIG_DIR = path.join(HOME, '.claude'); // real CLI config (auth lives here)
 
 // Session management: maps session-key → { uuid, lastUsed }
 const sessions = new Map();
@@ -74,9 +74,8 @@ if (require.main === module) {
 // Detect Claude CLI version at startup (only when running as main)
 let cliVersion = 'unknown';
 if (require.main === module) {
-  // Ensure proxy directories exist (separate from user's ~/.claude)
+  // Ensure proxy workspace exists (cwd isolation for sessions)
   fs.mkdirSync(WORKSPACE, { recursive: true });
-  fs.mkdirSync(CLAUDE_CONFIG, { recursive: true });
 
   try {
     cliVersion = execSync(`${CLAUDE_PATH} --version 2>/dev/null`, { timeout: 5000 }).toString().trim();
@@ -269,7 +268,7 @@ async function handleMessages(req, res) {
   // Check both in-memory map AND on-disk JSONL to survive proxy restarts
   const cwdSlug = WORKSPACE.replace(/[/.]/g, '-');
   const sessionJsonlPath = path.join(
-    CLAUDE_CONFIG, 'projects', cwdSlug,
+    CLAUDE_CONFIG_DIR, 'projects', cwdSlug,
     `${sessionUuid}.jsonl`
   );
   let isResume = sessions.has(sessionKey) || fs.existsSync(sessionJsonlPath);
@@ -355,7 +354,6 @@ async function handleMessages(req, res) {
 
     const env = { ...process.env };
     delete env.ANTHROPIC_API_KEY;
-    env.CLAUDE_CONFIG_DIR = CLAUDE_CONFIG;
 
     const child = spawn(CLAUDE_PATH, args, {
       env,
@@ -1170,6 +1168,6 @@ module.exports = {
   _internals: {
     sessions, activeRuns, sessionQueues, monitorClients,
     IDLE_TIMEOUT_MS, TOOL_IDLE_TIMEOUT_MS, COMPACTION_TIMEOUT_MS, SESSION_TTL_MS,
-    WORKSPACE, CLAUDE_CONFIG, CLAUDE_PATH, HOME
+    WORKSPACE, CLAUDE_CONFIG_DIR, CLAUDE_PATH, HOME
   }
 };

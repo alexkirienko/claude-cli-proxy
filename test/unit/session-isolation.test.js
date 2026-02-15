@@ -12,9 +12,9 @@ describe('Session isolation', () => {
     assert.strictEqual(internals.WORKSPACE, expected);
   });
 
-  it('CLAUDE_CONFIG points to ~/.claude-proxy/config', () => {
-    const expected = path.join(internals.HOME, '.claude-proxy', 'config');
-    assert.strictEqual(internals.CLAUDE_CONFIG, expected);
+  it('CLAUDE_CONFIG_DIR points to ~/.claude (real CLI config)', () => {
+    const expected = path.join(internals.HOME, '.claude');
+    assert.strictEqual(internals.CLAUDE_CONFIG_DIR, expected);
   });
 
   it('WORKSPACE is separate from ~/.claude', () => {
@@ -24,11 +24,9 @@ describe('Session isolation', () => {
       'WORKSPACE must be inside .claude-proxy');
   });
 
-  it('CLAUDE_CONFIG is separate from ~/.claude', () => {
-    assert.ok(!internals.CLAUDE_CONFIG.endsWith('/.claude'),
-      'CLAUDE_CONFIG must not be ~/.claude');
-    assert.ok(internals.CLAUDE_CONFIG.includes('.claude-proxy'),
-      'CLAUDE_CONFIG must be inside .claude-proxy');
+  it('CLAUDE_CONFIG_DIR is the real ~/.claude dir (for auth)', () => {
+    assert.ok(internals.CLAUDE_CONFIG_DIR.endsWith('/.claude'),
+      'CLAUDE_CONFIG_DIR must be ~/.claude');
   });
 
   it('CLAUDE_PATH defaults to "claude" (not a hardcoded absolute path)', () => {
