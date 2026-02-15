@@ -18,13 +18,30 @@ jobs:
         with:
           release-type: node
 
-      # Auto-merge: release-please creates the PR, we merge it immediately.
-      # On the NEXT push, release-please detects the merged PR and creates
-      # the GitHub release — all in the same workflow run.
-      - name: Auto-merge release PR
+      # When a release PR is created, merge it and create the release
+      # in the same run. GITHUB_TOKEN merges don't trigger new runs,
+      # so we must do everything here.
+      - name: Auto-merge and release
         if: steps.release.outputs.prs_created == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PR_NUMBER=$(echo '${{ steps.release.outputs.prs }}' | jq -r '.[0].number')
+
+          # Merge the release PR
           gh pr merge "$PR_NUMBER" --merge -R ${{ github.repository }}
+          sleep 5
+
+          # Extract version from PR title ("chore(main): release 1.2.3")
+          VERSION=$(gh pr view "$PR_NUMBER" -R ${{ github.repository }} --json title -q '.title' | grep -oP '\d+\.\d+\.\d+')
+          TAG="v${VERSION}"
+
+          # Get changelog from PR body
+          BODY=$(gh pr view "$PR_NUMBER" -R ${{ github.repository }} --json body -q '.body')
+
+          # Create GitHub release with the tag
+          MERGE_SHA=$(gh pr view "$PR_NUMBER" -R ${{ github.repository }} --json mergeCommit -q '.mergeCommit.oid')
+          gh release create "$TAG" --target "$MERGE_SHA" --title "$TAG" --notes "$BODY" -R ${{ github.repository }}
+
+          # Mark as tagged so release-please skips it on next run
+          gh pr edit "$PR_NUMBER" -R ${{ github.repository }} --remove-label "autorelease: pending" --add-label "autorelease: tagged"
