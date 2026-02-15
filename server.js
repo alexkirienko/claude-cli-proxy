@@ -585,6 +585,13 @@ async function handleMessages(req, res) {
  * Handle streaming response with full Anthropic event compatibility
  */
 async function handleStreamingResponse(req, res, child, model, requestId, sessionKey, imagePaths, sessionUuid) {
+  const cleanupImages = () => {
+    if (imagePaths.length > 0) {
+      const tmpDir = path.dirname(imagePaths[0]);
+      fs.rm(tmpDir, { recursive: true, force: true }, () => {});
+    }
+  };
+
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -1071,6 +1078,13 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
  * Handle non-streaming response
  */
 async function handleNonStreamingResponse(req, res, child, model, requestId, sessionKey, imagePaths, sessionUuid) {
+  const cleanupImages = () => {
+    if (imagePaths.length > 0) {
+      const tmpDir = path.dirname(imagePaths[0]);
+      fs.rm(tmpDir, { recursive: true, force: true }, () => {});
+    }
+  };
+
   let stdout = '';
   let stderr = '';
 
