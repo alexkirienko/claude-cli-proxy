@@ -335,6 +335,14 @@ async function handleMessages(req, res) {
   }
   prompt = prompt.trim();
 
+  // Helper to clean up temp image files (called on early exit and child close/error)
+  const cleanupImages = () => {
+    if (imagePaths.length > 0) {
+      const tmpDir = path.dirname(imagePaths[0]);
+      fs.rm(tmpDir, { recursive: true, force: true }, () => {});
+    }
+  };
+
   // Strip gateway metadata tags that Claude would echo back
   prompt = prompt.replace(GATEWAY_TAG_RE, '');
 
@@ -421,6 +429,7 @@ async function handleMessages(req, res) {
       stop_reason: 'end_turn', stop_sequence: null,
       usage: { input_tokens: 0, output_tokens: 0 }
     }));
+    cleanupImages();
     return;
   }
 
@@ -508,6 +517,7 @@ async function handleMessages(req, res) {
   if (cancelled) {
     log(`[${requestId}] Client disconnected while queued, skipping`);
     if (sessionQueues.get(sessionKey) === done) sessionQueues.delete(sessionKey);
+    cleanupImages();
     return;
   }
 
@@ -694,11 +704,7 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
       log(`[${requestId}] Session saved: ${sessionKey.slice(0, 8)}... (${sessions.size} active)`);
     }
 
-    // Clean up temp image files
-    if (imagePaths && imagePaths.length > 0) {
-      const tmpDir = path.dirname(imagePaths[0]);
-      fs.rm(tmpDir, { recursive: true, force: true }, () => {});
-    }
+    cleanupImages();
 
     // Close any open non-tool_use content blocks visible to gateway
     if ((state.thinking || state.textStarted) && !insideToolUseBlock) {
@@ -747,6 +753,7 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
     log(`[${requestId}] Spawn error:`, err.message);
     emitMonitorEvent('cli_error', { requestId, error: err.message });
 
+    cleanupImages();
     sendSSE(res, 'error', {
       type: 'error',
       error: { type: 'api_error', message: err.message }
@@ -1090,11 +1097,7 @@ async function handleNonStreamingResponse(req, res, child, model, requestId, ses
       log(`[${requestId}] Session saved: ${sessionKey.slice(0, 8)}... (${sessions.size} active)`);
     }
 
-    // Clean up temp image files
-    if (imagePaths && imagePaths.length > 0) {
-      const tmpDir = path.dirname(imagePaths[0]);
-      fs.rm(tmpDir, { recursive: true, force: true }, () => {});
-    }
+    cleanupImages();
 
     // Try to parse JSON output regardless of exit code
     // CLI returns exit 1 for credit issues but still provides valid JSON
@@ -1169,6 +1172,7 @@ async function handleNonStreamingResponse(req, res, child, model, requestId, ses
     log(`[${requestId}] Spawn error:`, err.message);
     emitMonitorEvent('cli_error', { requestId, error: err.message });
 
+    cleanupImages();
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: { type: 'api_error', message: err.message } }));
   });
@@ -1265,7 +1269,15 @@ const server = http.createServer(async (req, res) => {
   debug(`${req.method} ${url.pathname}`);
 
   if (req.method === 'POST' && url.pathname === '/v1/messages') {
-    await handleMessages(req, res);
+    try {
+      await handleMessages(req, res);
+    } catch (err) {
+      log(`[Router Error]`, err.stack);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { type: 'api_error', message: 'Internal server error: ' + err.message } }));
+      }
+    }
   } else if (req.method === 'GET' && url.pathname === '/v1/models') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
