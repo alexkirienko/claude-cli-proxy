@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.5](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.7.4...v0.7.5) (2026-02-16)
+
+
+### Bug Fixes
+
+* stop deleting session JSONL files on retry (preserves conversation history) ([6ad4ae4](https://github.com/alexkirienko/claude-cli-proxy/commit/6ad4ae4ade38b9fac195fcef9e2c4b8e3ad9626d))
+
 ## [0.7.4](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.7.3...v0.7.4) (2026-02-16)
 
 
