@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.8.0...v0.8.1) (2026-02-16)
+
+
+### Bug Fixes
+
+* strip entire JSON metadata block for stable session keys ([37ae739](https://github.com/alexkirienko/claude-cli-proxy/commit/37ae7393137f06c264bd8f78ff8d8929d018bc88))
+
 ## [0.8.0](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.7.8...v0.8.0) (2026-02-16)
 
 
