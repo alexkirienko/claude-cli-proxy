@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.3](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.7.2...v0.7.3) (2026-02-16)
+
+
+### Bug Fixes
+
+* resolve 10 bugs found by deep code review ([d43f1e2](https://github.com/alexkirienko/claude-cli-proxy/commit/d43f1e2c80c9675a127de204f0c6111b4fee87a7))
+
 ## [0.7.2](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.7.1...v0.7.2) (2026-02-15)
 
 
