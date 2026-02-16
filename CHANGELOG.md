@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.8](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.7.7...v0.7.8) (2026-02-16)
+
+
+### Bug Fixes
+
+* use chat_id from OpenClaw metadata for stable session keys ([be8ce29](https://github.com/alexkirienko/claude-cli-proxy/commit/be8ce2970f1323daea23debb9fb8b1aca0856332))
+
 ## [0.7.7](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.7.6...v0.7.7) (2026-02-16)
 
 
