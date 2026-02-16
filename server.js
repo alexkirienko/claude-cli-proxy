@@ -529,20 +529,10 @@ async function handleMessages(req, res) {
     return;
   }
 
-  // Claude CLI treats an existing JSONL as "session in use" — but we need the JSONL
-  // for conversation continuity. Only clear it when we hit the lock error.
-  function clearSessionLock() {
-    try {
-      fs.unlinkSync(sessionJsonlPath);
-      log(`[${requestId}] Cleared stale session JSONL: ${path.basename(sessionJsonlPath)}`);
-    } catch (e) {
-      if (e.code !== 'ENOENT') log(`[${requestId}] Failed to clear session JSONL: ${e.message}`);
-    }
-  }
-
   // Spawn CLI with error recovery:
-  // - "already in use" → clear JSONL, fall back to --session-id (loses context but works)
+  // - "already in use" → wait for ghost process to exit, then retry (preserves JSONL)
   // - --resume fail → fall back to --session-id (new session)
+  // - other error → retry once (preserves JSONL)
   async function spawnWithRetry() {
     const child = spawnCli();
     let stderrBuf = '';
@@ -567,10 +557,9 @@ async function handleMessages(req, res) {
     if (!earlyExit.exited) return child; // still running → success
 
     if (stderrBuf.includes('already in use')) {
-      // Session locked — clear JSONL and retry with fresh session
-      log(`[${requestId}] Session locked, clearing JSONL and retrying...`);
-      clearSessionLock();
-      isResume = false;
+      // Session locked by ghost process — wait for it to release, then retry
+      log(`[${requestId}] Session locked, waiting for release...`);
+      await new Promise(r => setTimeout(r, 2000));
       return spawnCli();
     }
 
@@ -582,8 +571,8 @@ async function handleMessages(req, res) {
       return spawnCli();
     }
 
-    // Other error — clear JSONL (first spawn may have created it) and try once more
-    clearSessionLock();
+    // Other error — retry once without clearing JSONL (preserves conversation history)
+    log(`[${requestId}] CLI exited early (code ${earlyExit.code}, stderr: ${stderrBuf.trim().slice(0, 100)}), retrying...`);
     return spawnCli();
   }
 
