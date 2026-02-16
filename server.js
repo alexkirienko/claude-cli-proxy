@@ -383,10 +383,10 @@ async function handleMessages(req, res) {
   const identity = sender || chatId;
   const isPriority = identity != null;  // any identified Telegram message gets priority
 
-  // For hashing, strip dynamic fields (e.g. message_id) from system prompt
-  const sysTextStable = sysText.replace(/"message_id"\s*:\s*"[^"]*"/g, '"message_id":""');
-
-  // Derive session key: explicit header > identity-based > stable-system-prompt fallback
+  // Strip dynamic metadata blocks (JSON code fences) from system prompt for stable hashing.
+  // The inbound_meta block contains per-message fields (message_id, message_id_full,
+  // reply_to_id, history_count, etc.) that must not affect session key computation.
+  const sysTextStable = sysText.replace(/```json\n[\s\S]*?```/g, '');
   const sessionKey = req.headers['x-session-key']
     || crypto.createHash('md5').update((sysTextStable || 'default') + (identity ? '|' + identity : '')).digest('hex');
 

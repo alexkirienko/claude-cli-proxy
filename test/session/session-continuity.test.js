@@ -229,6 +229,72 @@ describe('Session: sender-based continuity', () => {
     }
   });
 
+  it('session resumes despite changing message_id_full, reply_to_id, and history_count', async () => {
+    const { request } = require('../helpers/test-server');
+    const spawnArgs = captureSpawnArgs();
+
+    // Realistic WhatsApp-style system prompt with all dynamic fields
+    const sysPrompt = (overrides) => {
+      const meta = {
+        schema: 'openclaw.inbound_meta.v1',
+        message_id: overrides.message_id || '100',
+        message_id_full: overrides.message_id_full || 'wa:100@s.whatsapp.net',
+        chat_id: 'whatsapp:491234567890',
+        channel: 'whatsapp',
+        provider: 'whatsapp',
+        surface: 'whatsapp',
+        chat_type: 'direct',
+        reply_to_id: overrides.reply_to_id || null,
+        flags: {
+          history_count: overrides.history_count || 0,
+          has_reply_context: overrides.has_reply_context || false,
+          has_forwarded_context: overrides.has_forwarded_context || false,
+          has_thread_starter: overrides.has_thread_starter || false,
+        },
+      };
+      return `You are a helpful WhatsApp bot.\n\`\`\`json\n${JSON.stringify(meta, null, 2)}\n\`\`\``;
+    };
+
+    const body1 = {
+      model: 'sonnet',
+      system: sysPrompt({ message_id: '100', message_id_full: 'wa:100@s.whatsapp.net', history_count: 0 }),
+      messages: [{ role: 'user', content: 'Hello' }],
+      stream: false,
+    };
+    const body2 = {
+      model: 'sonnet',
+      system: sysPrompt({ message_id: '200', message_id_full: 'wa:200@s.whatsapp.net', reply_to_id: 'wa:100@s.whatsapp.net', history_count: 1, has_reply_context: true }),
+      messages: [{ role: 'user', content: 'Follow up' }],
+      stream: false,
+    };
+    const headers = { 'Content-Type': 'application/json' };
+
+    const res1 = await request(`${url}/v1/messages`, { method: 'POST', body: body1, headers });
+    assert.equal(res1.status, 200, 'first request succeeds');
+
+    const realArgs1 = spawnArgs[1];
+    assert.ok(realArgs1, 'retry spawn args captured for first request');
+    assert.ok(realArgs1.includes('--session-id'), 'first request uses --session-id');
+
+    const sessionIdx1 = realArgs1.indexOf('--session-id');
+    const sessionUuid1 = realArgs1[sessionIdx1 + 1];
+
+    const res2 = await request(`${url}/v1/messages`, { method: 'POST', body: body2, headers });
+    assert.equal(res2.status, 200, 'second request succeeds');
+
+    const realArgs2 = spawnArgs[3];
+    assert.ok(realArgs2, 'retry spawn args captured for second request');
+    assert.ok(realArgs2.includes('--resume'), 'second request uses --resume');
+
+    const resumeIdx = realArgs2.indexOf('--resume');
+    const sessionUuid2 = realArgs2[resumeIdx + 1];
+    assert.equal(sessionUuid2, sessionUuid1, 'same session UUID despite all dynamic fields changing');
+
+    for (const [key] of internals.sessions) {
+      internals.sessions.delete(key);
+    }
+  });
+
   it('different chat_ids get separate sessions', async () => {
     const { request } = require('../helpers/test-server');
     const spawnArgs = captureSpawnArgs();
