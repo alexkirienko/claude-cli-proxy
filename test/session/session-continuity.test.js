@@ -181,4 +181,89 @@ describe('Session: sender-based continuity', () => {
       internals.sessions.delete(key);
     }
   });
+
+  it('chat_id-based session resumes despite changing message_id', async () => {
+    const { request } = require('../helpers/test-server');
+    const spawnArgs = captureSpawnArgs();
+
+    const sysPrompt = (msgId) => `You are a bot.\n\`\`\`json\n{"schema":"openclaw.inbound_meta.v1","message_id":"${msgId}","chat_id":"telegram:99999"}\n\`\`\``;
+
+    const body1 = {
+      model: 'sonnet',
+      system: sysPrompt('1001'),
+      messages: [{ role: 'user', content: 'Hello' }],
+      stream: false,
+    };
+    const body2 = {
+      model: 'sonnet',
+      system: sysPrompt('1002'),
+      messages: [{ role: 'user', content: 'Follow up' }],
+      stream: false,
+    };
+    const headers = { 'Content-Type': 'application/json' };
+
+    const res1 = await request(`${url}/v1/messages`, { method: 'POST', body: body1, headers });
+    assert.equal(res1.status, 200, 'first request succeeds');
+
+    const realArgs1 = spawnArgs[1];
+    assert.ok(realArgs1, 'retry spawn args captured for first request');
+    assert.ok(realArgs1.includes('--session-id'), 'first request uses --session-id');
+    assert.ok(!realArgs1.includes('--resume'), 'first request does not use --resume');
+
+    const sessionIdx1 = realArgs1.indexOf('--session-id');
+    const sessionUuid1 = realArgs1[sessionIdx1 + 1];
+
+    const res2 = await request(`${url}/v1/messages`, { method: 'POST', body: body2, headers });
+    assert.equal(res2.status, 200, 'second request succeeds');
+
+    const realArgs2 = spawnArgs[3];
+    assert.ok(realArgs2, 'retry spawn args captured for second request');
+    assert.ok(realArgs2.includes('--resume'), 'second request uses --resume');
+
+    const resumeIdx = realArgs2.indexOf('--resume');
+    const sessionUuid2 = realArgs2[resumeIdx + 1];
+    assert.equal(sessionUuid2, sessionUuid1, 'both requests use the same session UUID despite different message_id');
+
+    for (const [key] of internals.sessions) {
+      internals.sessions.delete(key);
+    }
+  });
+
+  it('different chat_ids get separate sessions', async () => {
+    const { request } = require('../helpers/test-server');
+    const spawnArgs = captureSpawnArgs();
+
+    const sysPrompt = (chatId) => `You are a bot.\n\`\`\`json\n{"schema":"openclaw.inbound_meta.v1","message_id":"1","chat_id":"${chatId}"}\n\`\`\``;
+
+    const bodyA = {
+      model: 'sonnet',
+      system: sysPrompt('telegram:111'),
+      messages: [{ role: 'user', content: 'Hi' }],
+      stream: false,
+    };
+    const bodyB = {
+      model: 'sonnet',
+      system: sysPrompt('telegram:222'),
+      messages: [{ role: 'user', content: 'Hi' }],
+      stream: false,
+    };
+    const headers = { 'Content-Type': 'application/json' };
+
+    const res1 = await request(`${url}/v1/messages`, { method: 'POST', body: bodyA, headers });
+    assert.equal(res1.status, 200, 'first chat request succeeds');
+
+    const res2 = await request(`${url}/v1/messages`, { method: 'POST', body: bodyB, headers });
+    assert.equal(res2.status, 200, 'second chat request succeeds');
+
+    const realArgs1 = spawnArgs[1];
+    const realArgs2 = spawnArgs[3];
+
+    const uuid1 = realArgs1[realArgs1.indexOf('--session-id') + 1];
+    const uuid2 = realArgs2[realArgs2.indexOf('--session-id') + 1];
+    assert.notEqual(uuid1, uuid2, 'different chat_ids get different session UUIDs');
+
+    for (const [key] of internals.sessions) {
+      internals.sessions.delete(key);
+    }
+  });
 });

@@ -53,6 +53,12 @@ function parseSender(prompt) {
   return m ? m[1].toLowerCase() : null;
 }
 
+// Extract chat_id from OpenClaw's inbound metadata JSON in system prompt
+function parseChatId(sysText) {
+  const m = sysText.match(/"chat_id"\s*:\s*"([^"]+)"/);
+  return m ? m[1] : null;
+}
+
 // Deterministic UUID from session key
 function sessionKeyToUuid(key) {
   const hash = crypto.createHash('sha256').update(key).digest('hex');
@@ -355,7 +361,6 @@ async function handleMessages(req, res) {
   prompt = prompt.replace(GATEWAY_TAG_RE, '');
 
   const sender = parseSender(prompt);
-  const isPriority = sender != null;  // any human Telegram message gets priority
 
   // Extract system prompt text
   let sysText = '';
@@ -373,11 +378,19 @@ async function handleMessages(req, res) {
     sysText = sysText.replace(GATEWAY_TAG_RE, '');
   }
 
-  // Derive session key: explicit header > sender-based (Telegram) > system-prompt-only fallback
-  const sessionKey = req.headers['x-session-key']
-    || crypto.createHash('md5').update((sysText || 'default') + (sender ? '|' + sender : '')).digest('hex');
+  // Identify session: sender tag in message > chat_id in system prompt metadata
+  const chatId = parseChatId(sysText);
+  const identity = sender || chatId;
+  const isPriority = identity != null;  // any identified Telegram message gets priority
 
-  log(`[${requestId}] sender=${sender} sessionKey=${sessionKey.slice(0,8)} prompt="${prompt.slice(0, 80)}"`);
+  // For hashing, strip dynamic fields (e.g. message_id) from system prompt
+  const sysTextStable = sysText.replace(/"message_id"\s*:\s*"[^"]*"/g, '"message_id":""');
+
+  // Derive session key: explicit header > identity-based > stable-system-prompt fallback
+  const sessionKey = req.headers['x-session-key']
+    || crypto.createHash('md5').update((sysTextStable || 'default') + (identity ? '|' + identity : '')).digest('hex');
+
+  log(`[${requestId}] sender=${sender} chatId=${chatId} sessionKey=${sessionKey.slice(0,8)} prompt="${prompt.slice(0, 80)}"`);
 
   // Use stored UUID if session was forked (regen), else deterministic from key
   let sessionUuid = sessions.get(sessionKey)?.uuid || sessionKeyToUuid(sessionKey);
@@ -1447,7 +1460,7 @@ if (require.main === module) {
 }
 
 module.exports = {
-  parseSender, sessionKeyToUuid, generateMessageId,
+  parseSender, parseChatId, sessionKeyToUuid, generateMessageId,
   extractJsonObjects, mapModelName, writeImagesToTmp,
   truncateSessionForRegenerate, gracefulShutdown,
   _server: server,
