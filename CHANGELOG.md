@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.7.8...v0.8.0) (2026-02-16)
+
+
+### Features
+
+* add E2E session continuity test suite ([45026f8](https://github.com/alexkirienko/claude-cli-proxy/commit/45026f8a2cdbd63836aeded39d58334f3ca8825d))
+
 ## [0.7.8](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.7.7...v0.7.8) (2026-02-16)
 
 
