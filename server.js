@@ -373,12 +373,12 @@ async function handleMessages(req, res) {
     sysText = sysText.replace(GATEWAY_TAG_RE, '');
   }
 
-  // Derive session key from request header or hash of system prompt + first message
+  // Derive session key: explicit header > sender-based (Telegram) > content-based fallback
   const firstMsgText = typeof messages[0]?.content === 'string'
     ? messages[0].content
     : (messages[0]?.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
   const sessionKey = req.headers['x-session-key']
-    || crypto.createHash('md5').update((sysText || 'default') + '|' + firstMsgText.slice(0, 200)).digest('hex');
+    || crypto.createHash('md5').update((sysText || 'default') + '|' + (sender || firstMsgText.slice(0, 200))).digest('hex');
   // Use stored UUID if session was forked (regen), else deterministic from key
   let sessionUuid = sessions.get(sessionKey)?.uuid || sessionKeyToUuid(sessionKey);
   // Check both in-memory map AND on-disk JSONL to survive proxy restarts
