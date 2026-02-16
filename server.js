@@ -24,7 +24,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const { spawn, execSync } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const { URL } = require('url');
 const os = require('os');
 
@@ -80,7 +80,7 @@ if (require.main === module) {
   fs.mkdirSync(WORKSPACE, { recursive: true });
 
   try {
-    cliVersion = execSync(`${CLAUDE_PATH} --version 2>/dev/null`, { timeout: 5000 }).toString().trim();
+    cliVersion = execFileSync(CLAUDE_PATH, ['--version'], { timeout: 5000 }).toString().trim();
   } catch {}
 }
 
@@ -169,7 +169,8 @@ function writeImagesToTmp(contentBlocks, requestId) {
 
   for (let i = 0; i < images.length; i++) {
     const img = images[i];
-    const ext = (img.source.media_type || 'image/png').split('/')[1] || 'png';
+    const rawExt = (img.source.media_type || 'image/png').split('/')[1] || 'png';
+    const ext = rawExt.split('+')[0]; // "svg+xml" → "svg"
     const filePath = path.join(tmpDir, `image-${i + 1}.${ext}`);
     fs.writeFileSync(filePath, Buffer.from(img.source.data, 'base64'));
     paths.push(filePath);
@@ -291,12 +292,19 @@ function extractJsonObjects(buffer) {
 /**
  * Convert Anthropic Messages API request to Claude CLI call with full event streaming
  */
+const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10 MB
+
 async function handleMessages(req, res) {
   const requestId = generateMessageId();
   let body = '';
 
   for await (const chunk of req) {
     body += chunk;
+    if (body.length > MAX_BODY_SIZE) {
+      res.writeHead(413, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { type: 'invalid_request', message: 'Request body too large' } }));
+      return;
+    }
   }
 
   let request;
@@ -541,12 +549,20 @@ async function handleMessages(req, res) {
     const onStderr = (d) => { stderrBuf += d; };
     child.stderr.on('data', onStderr);
 
+    // Absorb 'error' events during the race to prevent unhandled exception
+    // (the response handler will attach its own error listener after we return)
+    const onError = () => {};
+    child.on('error', onError);
+
+    let raceTimer;
     const earlyExit = await Promise.race([
       new Promise(resolve => child.once('close', code => resolve({ exited: true, code }))),
-      new Promise(resolve => setTimeout(() => resolve({ exited: false }), 3000)),
+      new Promise(resolve => { raceTimer = setTimeout(() => resolve({ exited: false }), 3000); }),
     ]);
+    clearTimeout(raceTimer);
 
     child.stderr.removeListener('data', onStderr);
+    child.removeListener('error', onError);
 
     if (!earlyExit.exited) return child; // still running → success
 
@@ -574,10 +590,27 @@ async function handleMessages(req, res) {
   const proc = await spawnWithRetry();
   activeRuns.set(sessionKey, { child: proc, requestId, done, resolveDone, isPriority, sender });
 
-  if (stream) {
-    await handleStreamingResponse(req, res, proc, model, requestId, sessionKey, imagePaths, sessionUuid);
-  } else {
-    await handleNonStreamingResponse(req, res, proc, model, requestId, sessionKey, imagePaths, sessionUuid);
+  try {
+    if (stream) {
+      await handleStreamingResponse(req, res, proc, model, requestId, sessionKey, imagePaths, sessionUuid);
+    } else {
+      await handleNonStreamingResponse(req, res, proc, model, requestId, sessionKey, imagePaths, sessionUuid);
+    }
+  } catch (err) {
+    // If handler setup throws (e.g., socket destroyed before listeners attach),
+    // clean up to prevent queue deadlock and orphaned child process
+    log(`[${requestId}] Handler error:`, err.message);
+    proc.kill('SIGTERM');
+    cleanupImages();
+    const entry = activeRuns.get(sessionKey);
+    if (entry?.requestId === requestId) {
+      entry.resolveDone();
+      activeRuns.delete(sessionKey);
+      if (sessionQueues.get(sessionKey) === entry.done) {
+        sessionQueues.delete(sessionKey);
+      }
+    }
+    throw err; // Re-throw for router's catch to send error response
   }
 }
 
@@ -692,10 +725,10 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
     emitMonitorEvent('cli_stderr', { requestId, message: stderr });
   });
 
-  child.on('close', (code) => {
-    clearTimeout(idleTimeout);
+  let responseEnded = false; // Guard against error+close double-fire
 
-    // Clean up active run tracking and resolve queue promise
+  // Helper: clean up active run tracking and resolve queue promise
+  const cleanupRun = () => {
     const entry = activeRuns.get(sessionKey);
     if (entry?.requestId === requestId) {
       entry.resolveDone();
@@ -704,6 +737,11 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
         sessionQueues.delete(sessionKey);
       }
     }
+  };
+
+  child.on('close', (code) => {
+    clearTimeout(idleTimeout);
+    cleanupRun();
 
     // Track session on success (use actual sessionUuid, which may be a regen fork)
     if (code === 0 && sessionKey) {
@@ -712,6 +750,10 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
     }
 
     cleanupImages();
+
+    // Skip SSE finalization if error handler already ended the response
+    if (responseEnded) return;
+    responseEnded = true;
 
     // Close any open non-tool_use content blocks visible to gateway
     if ((state.thinking || state.textStarted) && !insideToolUseBlock) {
@@ -746,21 +788,17 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
 
   child.on('error', (err) => {
     clearTimeout(idleTimeout);
-
-    // Clean up active run tracking and resolve queue promise
-    const entry = activeRuns.get(sessionKey);
-    if (entry?.requestId === requestId) {
-      entry.resolveDone();
-      activeRuns.delete(sessionKey);
-      if (sessionQueues.get(sessionKey) === entry.done) {
-        sessionQueues.delete(sessionKey);
-      }
-    }
+    cleanupRun();
 
     log(`[${requestId}] Spawn error:`, err.message);
     emitMonitorEvent('cli_error', { requestId, error: err.message });
 
     cleanupImages();
+
+    // Guard: error fires before close — mark done so close handler skips SSE writes
+    if (responseEnded) return;
+    responseEnded = true;
+
     sendSSE(res, 'error', {
       type: 'error',
       error: { type: 'api_error', message: err.message }
@@ -1087,15 +1125,45 @@ async function handleNonStreamingResponse(req, res, child, model, requestId, ses
 
   let stdout = '';
   let stderr = '';
+  let responseDone = false; // Guard against error+close double-fire
 
-  child.stdout.on('data', (data) => { stdout += data; });
+  // Idle timeout — kill child if no output for TOOL_IDLE_TIMEOUT_MS
+  // (non-streaming CLI often runs tools, so use the longer timeout)
+  let idleTimeout = setTimeout(() => {
+    log(`[${requestId}] Non-streaming idle timeout (${TOOL_IDLE_TIMEOUT_MS}ms), killing child`);
+    emitMonitorEvent('cli_timeout', { requestId, type: 'idle', streaming: false });
+    child.kill('SIGTERM');
+  }, TOOL_IDLE_TIMEOUT_MS);
+
+  // Handle client disconnect — kill child to free resources and unblock queue
+  let clientDisconnected = false;
+  const onClientClose = () => {
+    if (clientDisconnected) return;
+    clientDisconnected = true;
+    log(`[${requestId}] Non-streaming client disconnected, killing child`);
+    clearTimeout(idleTimeout);
+    child.kill('SIGTERM');
+  };
+  req.on('close', onClientClose);
+  res.on('close', onClientClose);
+
+  child.stdout.on('data', (data) => {
+    stdout += data;
+    // Reset timeout on data
+    clearTimeout(idleTimeout);
+    idleTimeout = setTimeout(() => {
+      log(`[${requestId}] Non-streaming idle timeout (${TOOL_IDLE_TIMEOUT_MS}ms), killing child`);
+      emitMonitorEvent('cli_timeout', { requestId, type: 'idle', streaming: false });
+      child.kill('SIGTERM');
+    }, TOOL_IDLE_TIMEOUT_MS);
+  });
   child.stderr.on('data', (data) => {
     stderr += data;
     emitMonitorEvent('cli_stderr', { requestId, message: data.toString() });
   });
 
-  child.on('close', (code) => {
-    // Clean up active run tracking and resolve queue promise
+  // Helper: clean up active run tracking and resolve queue promise
+  const cleanupRun = () => {
     const entry = activeRuns.get(sessionKey);
     if (entry?.requestId === requestId) {
       entry.resolveDone();
@@ -1104,6 +1172,11 @@ async function handleNonStreamingResponse(req, res, child, model, requestId, ses
         sessionQueues.delete(sessionKey);
       }
     }
+  };
+
+  child.on('close', (code) => {
+    clearTimeout(idleTimeout);
+    cleanupRun();
 
     // Track session on success (use actual sessionUuid, which may be a regen fork)
     if (code === 0 && sessionKey) {
@@ -1112,6 +1185,10 @@ async function handleNonStreamingResponse(req, res, child, model, requestId, ses
     }
 
     cleanupImages();
+
+    // Skip response if already sent by error handler
+    if (responseDone) return;
+    responseDone = true;
 
     // Try to parse JSON output regardless of exit code
     // CLI returns exit 1 for credit issues but still provides valid JSON
@@ -1167,26 +1244,26 @@ async function handleNonStreamingResponse(req, res, child, model, requestId, ses
       log(`[${requestId}] Parse error:`, e.message);
       emitMonitorEvent('request_error', { requestId, error: e.message });
 
-      res.writeHead(500, { 'Content-Type': 'application/json' });
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+      }
       res.end(JSON.stringify({ error: { type: 'api_error', message: 'Failed to parse CLI output' } }));
     }
   });
 
   child.on('error', (err) => {
-    // Clean up active run tracking and resolve queue promise
-    const entry = activeRuns.get(sessionKey);
-    if (entry?.requestId === requestId) {
-      entry.resolveDone();
-      activeRuns.delete(sessionKey);
-      if (sessionQueues.get(sessionKey) === entry.done) {
-        sessionQueues.delete(sessionKey);
-      }
-    }
+    clearTimeout(idleTimeout);
+    cleanupRun();
 
     log(`[${requestId}] Spawn error:`, err.message);
     emitMonitorEvent('cli_error', { requestId, error: err.message });
 
     cleanupImages();
+
+    // Guard: error fires before close — mark done so close handler skips response
+    if (responseDone) return;
+    responseDone = true;
+
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: { type: 'api_error', message: err.message } }));
   });
@@ -1231,7 +1308,9 @@ async function handleDeploy(req, res) {
 
   const sig = req.headers['x-hub-signature-256'] || '';
   const expected = 'sha256=' + crypto.createHmac('sha256', DEPLOY_SECRET).update(body).digest('hex');
-  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
+  const sigBuf = Buffer.from(sig);
+  const expectedBuf = Buffer.from(expected);
+  if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
     log('[deploy] Invalid webhook signature');
     res.writeHead(401, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'invalid signature' }));
@@ -1328,7 +1407,15 @@ const server = http.createServer(async (req, res) => {
   } else if (req.method === 'GET' && url.pathname === '/events') {
     handleMonitorEvents(req, res);
   } else if (req.method === 'POST' && url.pathname === '/deploy') {
-    await handleDeploy(req, res);
+    try {
+      await handleDeploy(req, res);
+    } catch (err) {
+      log(`[Deploy Error]`, err.stack);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Internal server error' }));
+      }
+    }
   } else {
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: { type: 'not_found', message: 'Not found' } }));

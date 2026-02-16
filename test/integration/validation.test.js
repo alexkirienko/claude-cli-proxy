@@ -60,4 +60,19 @@ describe('POST /v1/messages validation', () => {
       assert.equal(res.json.error.message, 'No user message found');
     });
   });
+
+  describe('request body too large', () => {
+    it('returns 413 for oversized body', async () => {
+      // Create a body just over 10MB
+      const largeContent = 'x'.repeat(10 * 1024 * 1024 + 1);
+      const res = await request(`${url}/v1/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: largeContent,
+      });
+      assert.equal(res.status, 413);
+      assert.equal(res.json.error.type, 'invalid_request');
+      assert.match(res.json.error.message, /too large/i);
+    });
+  });
 });
