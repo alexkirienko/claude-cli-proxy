@@ -335,9 +335,10 @@ async function testPreemption() {
   // Wait for CLI to spawn
   await sleep(3000);
 
-  // Fire preempting request
+  // Fire preempting request with explicit regenerate
   const r3 = await sendMessage(chatId, '3',
-    'What number did I ask you to remember? Just the number.');
+    'What number did I ask you to remember? Just the number.',
+    { regenerate: true });
   check = assertOk(r3, 'preempt msg');
 
   // Wait for long promise to settle (was killed)

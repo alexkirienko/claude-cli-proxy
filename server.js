@@ -515,13 +515,14 @@ async function handleMessages(req, res) {
   const prevTail = sessionQueues.get(sessionKey);
   sessionQueues.set(sessionKey, done);
 
-  // Session preemption: if a new request arrives for a session that already has
-  // an active CLI, the gateway has abandoned the previous run. Kill it immediately
-  // so the queue unblocks. The old CLI's exit resolves prevTail via resolveDone().
-  const activeRun = activeRuns.get(sessionKey);
-  if (activeRun) {
-    log(`[${requestId}] Preempting active run ${activeRun.requestId} for session ${sessionKey.slice(0, 8)}...`);
-    activeRun.child.kill('SIGTERM');
+  // Only preempt on explicit regenerate — normal messages queue behind the active run.
+  // Implicit preemption would lose the killed CLI's user message from session history.
+  if (isRegenerate) {
+    const activeRun = activeRuns.get(sessionKey);
+    if (activeRun) {
+      log(`[${requestId}] Regenerate: preempting active run ${activeRun.requestId} for session ${sessionKey.slice(0, 8)}...`);
+      activeRun.child.kill('SIGTERM');
+    }
   }
 
   // Handle client disconnect while queued (prevent queue hang)
@@ -535,8 +536,12 @@ async function handleMessages(req, res) {
   }
 
   req.removeListener('close', onDisconnect);
-  if (cancelled) {
+  // Check both the cancelled flag (set by close event) and socket.destroyed
+  // (synchronous property). The close event is async I/O and may not fire before
+  // a microtask continuation after await, but destroyed is set immediately.
+  if (cancelled || req.socket?.destroyed) {
     log(`[${requestId}] Client disconnected while queued, skipping`);
+    if (!cancelled) resolveDone(); // close event hasn't fired yet, manually resolve
     if (sessionQueues.get(sessionKey) === done) sessionQueues.delete(sessionKey);
     cleanupImages();
     return;
