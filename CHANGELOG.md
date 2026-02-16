@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.2](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.8.1...v0.8.2) (2026-02-16)
+
+
+### Bug Fixes
+
+* stop implicit preemption of same-session requests ([d768c45](https://github.com/alexkirienko/claude-cli-proxy/commit/d768c45a31d7d8cd0d855bce128c788d657dd1ac))
+
 ## [0.8.1](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.8.0...v0.8.1) (2026-02-16)
 
 
