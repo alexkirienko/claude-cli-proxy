@@ -19,8 +19,8 @@ describe('parseSender', () => {
     assert.equal(parseSender('Just a normal message'), null);
   });
 
-  it('returns null when tag is not at end', () => {
-    assert.equal(parseSender('[from: A (@a)] more text'), null);
+  it('matches tag even when not at end', () => {
+    assert.equal(parseSender('[from: A (@a)] more text'), 'a');
   });
 
   it('returns null for empty string', () => {

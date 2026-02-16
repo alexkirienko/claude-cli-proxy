@@ -49,7 +49,7 @@ const sessionQueues = new Map(); // sessionKey → Promise (tail of chain)
 
 // Extract sender username from OpenClaw's [from: Name (@user)] tag
 function parseSender(prompt) {
-  const m = prompt.match(/\[from:\s*.+?\(@(\w+)\)\]\s*$/);
+  const m = prompt.match(/\[from:\s*.+?\(@(\w+)\)\]/);
   return m ? m[1].toLowerCase() : null;
 }
 
@@ -373,12 +373,12 @@ async function handleMessages(req, res) {
     sysText = sysText.replace(GATEWAY_TAG_RE, '');
   }
 
-  // Derive session key: explicit header > sender-based (Telegram) > content-based fallback
-  const firstMsgText = typeof messages[0]?.content === 'string'
-    ? messages[0].content
-    : (messages[0]?.content || []).filter(c => c.type === 'text').map(c => c.text).join('');
+  // Derive session key: explicit header > sender-based (Telegram) > system-prompt-only fallback
   const sessionKey = req.headers['x-session-key']
-    || crypto.createHash('md5').update((sysText || 'default') + '|' + (sender || firstMsgText.slice(0, 200))).digest('hex');
+    || crypto.createHash('md5').update((sysText || 'default') + (sender ? '|' + sender : '')).digest('hex');
+
+  log(`[${requestId}] sender=${sender} sessionKey=${sessionKey.slice(0,8)} prompt="${prompt.slice(0, 80)}"`);
+
   // Use stored UUID if session was forked (regen), else deterministic from key
   let sessionUuid = sessions.get(sessionKey)?.uuid || sessionKeyToUuid(sessionKey);
   // Check both in-memory map AND on-disk JSONL to survive proxy restarts
