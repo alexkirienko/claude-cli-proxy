@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.7](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.7.6...v0.7.7) (2026-02-16)
+
+
+### Bug Fixes
+
+* allow sender tag matching anywhere in message ([9350c45](https://github.com/alexkirienko/claude-cli-proxy/commit/9350c45c582ab4c17b68a05753093a645e393fcc))
+
 ## [0.7.6](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.7.5...v0.7.6) (2026-02-16)
 
 
