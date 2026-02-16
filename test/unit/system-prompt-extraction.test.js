@@ -10,15 +10,14 @@ describe('system prompt extraction', { timeout: 30000 }, () => {
   });
 
   after(async () => {
-    // Allow spawned /bin/echo processes to fully exit before closing server
     await new Promise(r => setTimeout(r, 1000));
     await close();
   });
 
-  // With CLAUDE_PATH=/bin/echo, valid requests pass validation (no 400)
-  // but CLI output is not JSON, so we expect 500 "No parseable output from CLI".
-  // A 400 would mean system prompt extraction crashed during validation.
-  // A 500 with "Internal server error" would mean extraction threw an exception.
+  // These tests verify that system prompt extraction doesn't crash (400)
+  // or throw an unhandled exception (500 "Internal server error").
+  // The CLI itself will fail (500) since CLAUDE_PATH is /bin/echo or similar,
+  // but the specific error message varies by platform (ENOENT vs parse error).
 
   const validBody = (systemValue) => JSON.stringify({
     model: 'sonnet',
@@ -27,17 +26,26 @@ describe('system prompt extraction', { timeout: 30000 }, () => {
     ...(systemValue !== undefined ? { system: systemValue } : {}),
   });
 
+  function assertNotValidationError(res) {
+    // 400 = validation failed during system prompt extraction (bug)
+    assert.notEqual(res.status, 400, 'should not be a validation error');
+    // 500 is expected (CLI fails), but should not be "Internal server error"
+    // which would indicate an unhandled exception in system prompt extraction
+    assert.equal(res.status, 500);
+    assert.ok(res.json?.error?.message, 'error has a message');
+    assert.ok(
+      !res.json.error.message.startsWith('Internal server error'),
+      'should not be an unhandled exception'
+    );
+  }
+
   it('accepts system as string', async () => {
     const res = await request(`${url}/v1/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: validBody('You are a helpful assistant'),
     });
-    // Should not be a validation error
-    assert.notEqual(res.status, 400);
-    // Should be a CLI output parse error (expected with /bin/echo)
-    assert.equal(res.status, 500);
-    assert.equal(res.json.error.message, 'No parseable output from CLI');
+    assertNotValidationError(res);
   });
 
   it('accepts system as array of text blocks', async () => {
@@ -49,9 +57,7 @@ describe('system prompt extraction', { timeout: 30000 }, () => {
         { type: 'text', text: 'Be concise.' },
       ]),
     });
-    assert.notEqual(res.status, 400);
-    assert.equal(res.status, 500);
-    assert.equal(res.json.error.message, 'No parseable output from CLI');
+    assertNotValidationError(res);
   });
 
   it('accepts system as object with .text property', async () => {
@@ -60,9 +66,7 @@ describe('system prompt extraction', { timeout: 30000 }, () => {
       headers: { 'Content-Type': 'application/json' },
       body: validBody({ text: 'You are a helpful assistant.' }),
     });
-    assert.notEqual(res.status, 400);
-    assert.equal(res.status, 500);
-    assert.equal(res.json.error.message, 'No parseable output from CLI');
+    assertNotValidationError(res);
   });
 
   it('accepts request with no system prompt', async () => {
@@ -71,9 +75,7 @@ describe('system prompt extraction', { timeout: 30000 }, () => {
       headers: { 'Content-Type': 'application/json' },
       body: validBody(undefined),
     });
-    assert.notEqual(res.status, 400);
-    assert.equal(res.status, 500);
-    assert.equal(res.json.error.message, 'No parseable output from CLI');
+    assertNotValidationError(res);
   });
 
   it('strips gateway tags from system string', async () => {
@@ -82,9 +84,7 @@ describe('system prompt extraction', { timeout: 30000 }, () => {
       headers: { 'Content-Type': 'application/json' },
       body: validBody('You are helpful [[reply_to_message_id: 123]] '),
     });
-    assert.notEqual(res.status, 400);
-    assert.equal(res.status, 500);
-    assert.equal(res.json.error.message, 'No parseable output from CLI');
+    assertNotValidationError(res);
   });
 
   it('handles empty string system prompt', async () => {
@@ -93,9 +93,7 @@ describe('system prompt extraction', { timeout: 30000 }, () => {
       headers: { 'Content-Type': 'application/json' },
       body: validBody(''),
     });
-    assert.notEqual(res.status, 400);
-    assert.equal(res.status, 500);
-    assert.equal(res.json.error.message, 'No parseable output from CLI');
+    assertNotValidationError(res);
   });
 
   it('handles system array with mixed block types (non-text filtered)', async () => {
@@ -107,8 +105,6 @@ describe('system prompt extraction', { timeout: 30000 }, () => {
         { type: 'image', source: { type: 'base64', data: 'abc' } },
       ]),
     });
-    assert.notEqual(res.status, 400);
-    assert.equal(res.status, 500);
-    assert.equal(res.json.error.message, 'No parseable output from CLI');
+    assertNotValidationError(res);
   });
 });
