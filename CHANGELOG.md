@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.4](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.7.3...v0.7.4) (2026-02-16)
+
+
+### Bug Fixes
+
+* make system-prompt-extraction tests portable across CI ([a67b15d](https://github.com/alexkirienko/claude-cli-proxy/commit/a67b15d04bdd10f034284dac6e7c51264c9f7063))
+
 ## [0.7.3](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.7.2...v0.7.3) (2026-02-16)
 
 
