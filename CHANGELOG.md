@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.6](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.7.5...v0.7.6) (2026-02-16)
+
+
+### Bug Fixes
+
+* use sender identity for session key to preserve conversation context ([5bf358b](https://github.com/alexkirienko/claude-cli-proxy/commit/5bf358b9145af1351c80a561c7e53579a611ee84))
+
 ## [0.7.5](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.7.4...v0.7.5) (2026-02-16)
 
 
