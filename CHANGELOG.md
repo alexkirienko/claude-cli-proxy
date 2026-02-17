@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.3](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.9.2...v0.9.3) (2026-02-17)
+
+
+### Bug Fixes
+
+* harden security and robustness from code review findings ([76cc5c5](https://github.com/alexkirienko/claude-cli-proxy/commit/76cc5c51703700c6ff7c349b7b99dfc1e1983116))
+
 ## [0.9.2](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.9.1...v0.9.2) (2026-02-17)
 
 
