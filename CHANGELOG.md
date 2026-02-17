@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.3](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.8.2...v0.8.3) (2026-02-17)
+
+
+### Bug Fixes
+
+* forward channel identity on resumed sessions ([63174cd](https://github.com/alexkirienko/claude-cli-proxy/commit/63174cd6bb4fad2f3994c867cd5dafa3cc2e5d78))
+
 ## [0.8.2](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.8.1...v0.8.2) (2026-02-16)
 
 
