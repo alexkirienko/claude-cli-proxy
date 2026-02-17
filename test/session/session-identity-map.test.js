@@ -58,7 +58,11 @@ describe('Session: identity map (cross-channel merging)', () => {
   }
 
   function sysPrompt(chatId) {
-    return `You are a bot.\n\`\`\`json\n{"schema":"openclaw.inbound_meta.v1","message_id":"1","chat_id":"${chatId}"}\n\`\`\``;
+    const channel = chatId.startsWith('signal:') ? 'signal' : 'telegram';
+    const caps = channel === 'telegram' ? 'inlineButtons' : 'none';
+    const msgId = channel === 'telegram' ? '2' : '1';
+    return `You are a bot.\nRuntime: channel=${channel} | capabilities=${caps}\n` +
+      `\`\`\`json\n{"schema":"openclaw.inbound_meta.v1","message_id":"${msgId}","chat_id":"${chatId}"}\n\`\`\``;
   }
 
   it('mapped identities share a session', async () => {
