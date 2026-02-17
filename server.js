@@ -57,6 +57,26 @@ function resolveIdentity(id) {
 // Session management: maps session-key → { uuid, lastUsed }
 const sessions = new Map();
 const SESSION_TTL_MS = 3600 * 1000; // 1 hour
+const SESSIONS_FILE = path.join(path.dirname(WORKSPACE), 'sessions.json');
+
+// Load persisted sessions from disk
+try {
+  const data = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
+  for (const [key, val] of Object.entries(data)) {
+    sessions.set(key, val);
+  }
+  log(`Loaded ${sessions.size} sessions from disk`);
+} catch { /* no file yet = fresh start */ }
+
+// Debounced persist to avoid thrashing on rapid updates
+let _saveTimer;
+function persistSessions() {
+  clearTimeout(_saveTimer);
+  _saveTimer = setTimeout(() => {
+    const obj = Object.fromEntries(sessions);
+    fs.writeFile(SESSIONS_FILE, JSON.stringify(obj), () => {});
+  }, 1000);
+}
 
 // Active run tracking: session-key → { child, requestId, done, resolveDone }
 const activeRuns = new Map();
@@ -87,12 +107,15 @@ function sessionKeyToUuid(key) {
 if (require.main === module) {
   setInterval(() => {
     const now = Date.now();
+    let evicted = 0;
     for (const [key, info] of sessions) {
       if (now - info.lastUsed > SESSION_TTL_MS) {
         log(`[session] Evicting expired session: ${key.slice(0, 8)}...`);
         sessions.delete(key);
+        evicted++;
       }
     }
+    if (evicted) persistSessions();
   }, 600_000);
 }
 
@@ -657,6 +680,7 @@ async function handleMessages(req, res) {
     if (isResume && result.code !== 0) {
       log(`[${requestId}] Resume failed (${result.stderr.trim().slice(0, 100)}), falling back to new session`);
       sessions.delete(sessionKey);
+      persistSessions();
       isResume = false;
       sessionUuid = sessionKeyToUuid(sessionKey + ':v' + Date.now());
       const retry = spawnCli();
@@ -856,6 +880,7 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
     // Track session on success (use actual sessionUuid, which may be a regen fork)
     if (code === 0 && sessionKey) {
       sessions.set(sessionKey, { uuid: sessionUuid, lastUsed: Date.now() });
+      persistSessions();
       log(`[${requestId}] Session saved: ${sessionKey.slice(0, 8)}... (${sessions.size} active)`);
     }
 
@@ -1306,6 +1331,7 @@ async function handleNonStreamingResponse(req, res, child, model, requestId, ses
     // Track session on success (use actual sessionUuid, which may be a regen fork)
     if (code === 0 && sessionKey) {
       sessions.set(sessionKey, { uuid: sessionUuid, lastUsed: Date.now() });
+      persistSessions();
       log(`[${requestId}] Session saved: ${sessionKey.slice(0, 8)}... (${sessions.size} active)`);
     }
 
@@ -1588,13 +1614,13 @@ const _internals = {
   sessions, activeRuns, sessionQueues, monitorClients,
   IDLE_TIMEOUT_MS, TOOL_IDLE_TIMEOUT_MS, COMPACTION_TIMEOUT_MS, SESSION_TTL_MS,
   WORKSPACE, CLAUDE_CONFIG_DIR, CLAUDE_PATH, HOME, identityMap,
-  EARLY_EXIT_RACE_MS: 3000,
+  SESSIONS_FILE, EARLY_EXIT_RACE_MS: 3000,
 };
 
 module.exports = {
   parseSender, parseChatId, sessionKeyToUuid, generateMessageId,
   extractJsonObjects, mapModelName, writeImagesToTmp,
-  truncateSessionForRegenerate, gracefulShutdown, resolveIdentity, killChild,
+  truncateSessionForRegenerate, gracefulShutdown, resolveIdentity, killChild, persistSessions,
   _server: server,
   _internals,
 };
