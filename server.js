@@ -798,8 +798,10 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
     }
   });
 
+  let stderrBuf = '';
   child.stderr.on('data', (data) => {
     const stderr = data.toString();
+    stderrBuf += stderr;
     debug('stderr:', stderr);
     emitMonitorEvent('cli_stderr', { requestId, message: stderr });
   });
@@ -836,12 +838,13 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
 
     // If CLI failed without producing any content, send an error event
     if (code !== 0 && contentBlocks.length === 0) {
+      const reason = stderrBuf.trim().slice(0, 200) || `exit code ${code}`;
       sendSSE(res, 'error', {
         type: 'error',
-        error: { type: 'api_error', message: 'CLI process exited without producing content' }
+        error: { type: 'api_error', message: `CLI failed: ${reason}` }
       });
       setTimeout(() => { res.end(); }, 10);
-      log(`[${requestId}] Completed with error (code ${code}): 0 tokens, 0 blocks`);
+      log(`[${requestId}] Completed with error (code ${code}): ${reason}`);
       return;
     }
 
