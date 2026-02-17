@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.8.3...v0.9.0) (2026-02-17)
+
+
+### Features
+
+* identity alias map for cross-channel session merging ([2efe8c2](https://github.com/alexkirienko/claude-cli-proxy/commit/2efe8c293163ef6d8fc84eeef5c029e3d03edf01))
+
 ## [0.8.3](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.8.2...v0.8.3) (2026-02-17)
 
 
