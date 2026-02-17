@@ -469,8 +469,12 @@ async function handleMessages(req, res) {
     if (isResume) {
       args.push('--resume', sessionUuid);
       // Nudge the agent to re-read project instructions after compaction
-      args.push('--append-system-prompt',
-        'Remember: read CLAUDE.md project instructions. Check workspace files (SOUL.md, memory/) if context feels incomplete.');
+      let appendPrompt = 'Remember: read CLAUDE.md project instructions. Check workspace files (SOUL.md, memory/) if context feels incomplete.';
+      if (chatId) {
+        const channel = chatId.split(':')[0];  // "telegram" or "signal"
+        appendPrompt += `\nCurrent channel: ${channel} (${chatId}).`;
+      }
+      args.push('--append-system-prompt', appendPrompt);
     } else {
       args.push('--session-id', sessionUuid);
       if (sysText) {
@@ -687,6 +691,13 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
     log(`[${requestId}] Client disconnected, killing child`);
     clearTimeout(idleTimeout);
     child.kill('SIGTERM');
+    // Force-kill if SIGTERM is ignored (prevents queue deadlock)
+    setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        log(`[${requestId}] Child did not exit after SIGTERM, sending SIGKILL`);
+        child.kill('SIGKILL');
+      }
+    }, 5000);
   };
   req.on('close', onClientClose);
   res.on('close', onClientClose);
@@ -1150,6 +1161,13 @@ async function handleNonStreamingResponse(req, res, child, model, requestId, ses
     log(`[${requestId}] Non-streaming client disconnected, killing child`);
     clearTimeout(idleTimeout);
     child.kill('SIGTERM');
+    // Force-kill if SIGTERM is ignored (prevents queue deadlock)
+    setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        log(`[${requestId}] Child did not exit after SIGTERM, sending SIGKILL`);
+        child.kill('SIGKILL');
+      }
+    }, 5000);
   };
   req.on('close', onClientClose);
   res.on('close', onClientClose);

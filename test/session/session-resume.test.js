@@ -120,4 +120,66 @@ describe('Session: resume logic', () => {
 
     internals.sessions.delete('test-resume-session');
   });
+
+  it('resumed session includes channel context in --append-system-prompt', async () => {
+    const { request } = require('../helpers/test-server');
+    const spawnArgs = [];
+    let spawnCount = 0;
+
+    spawnHandler = (cmd, args) => {
+      spawnCount++;
+      spawnArgs.push([...args]);
+      if (spawnCount % 2 === 1) {
+        return createMockChild({ exitCode: 0, autoClose: true, closeDelay: 5 });
+      }
+      const child = createMockChild({ autoClose: false });
+      process.nextTick(() => {
+        child.stdout.push(JSON.stringify({
+          result: 'OK',
+          usage: { input_tokens: 10, output_tokens: 5 },
+        }));
+        setTimeout(() => child.emit('close', 0), 50);
+      });
+      return child;
+    };
+
+    const sysPrompt = [
+      'You are a helpful assistant.',
+      '```json\n{"openclaw.inbound_meta.v1":{"chat_id":"telegram:12345","message_id":"99"}}\n```',
+    ].join('\n');
+
+    const body = {
+      model: 'sonnet',
+      messages: [{ role: 'user', content: 'Hello' }],
+      system: sysPrompt,
+      stream: false,
+    };
+
+    // First request — establishes session
+    const res1 = await request(`${url}/v1/messages`, {
+      method: 'POST',
+      body,
+      headers: { 'Content-Type': 'application/json' },
+    });
+    assert.equal(res1.status, 200, 'first request succeeds');
+
+    // Second request — resumed, should include channel context
+    const res2 = await request(`${url}/v1/messages`, {
+      method: 'POST',
+      body,
+      headers: { 'Content-Type': 'application/json' },
+    });
+    assert.equal(res2.status, 200, 'second request succeeds');
+
+    // The retry spawn for request 2 is at index 3
+    const realArgs2 = spawnArgs[3];
+    assert.ok(realArgs2, 'retry spawn args captured for second request');
+    assert.ok(realArgs2.includes('--resume'), 'second request uses --resume');
+
+    const appendIdx = realArgs2.indexOf('--append-system-prompt');
+    assert.ok(appendIdx !== -1, '--append-system-prompt is present');
+    const appendValue = realArgs2[appendIdx + 1];
+    assert.ok(appendValue.includes('telegram'), 'append-system-prompt contains channel name "telegram"');
+    assert.ok(appendValue.includes('telegram:12345'), 'append-system-prompt contains full chat_id');
+  });
 });
