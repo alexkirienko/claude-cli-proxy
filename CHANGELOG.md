@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.4](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.9.3...v0.9.4) (2026-02-17)
+
+
+### Bug Fixes
+
+* persist sessions Map to disk to survive service restarts ([889da4b](https://github.com/alexkirienko/claude-cli-proxy/commit/889da4b0a255bd4ebe6b1edcf89831afa1b08b88))
+
 ## [0.9.3](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.9.2...v0.9.3) (2026-02-17)
 
 
