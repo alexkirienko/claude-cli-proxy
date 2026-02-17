@@ -37,6 +37,21 @@ const WORKSPACE = process.env.CLAUDE_PROXY_WORKSPACE || path.join(HOME, '.claude
 const CLAUDE_CONFIG_DIR = path.join(HOME, '.claude'); // real CLI config (auth lives here)
 const DEPLOY_SECRET = process.env.DEPLOY_WEBHOOK_SECRET || '';
 
+// Identity alias map: resolves alternative chat_ids to a canonical identity
+// so the same user on different channels (e.g. Telegram + Signal) shares one session.
+const IDENTITY_MAP_PATH = process.env.CLAUDE_PROXY_IDENTITY_MAP
+  || path.join(HOME, '.claude-proxy', 'identity-map.json');
+
+let identityMap = {};
+try {
+  identityMap = JSON.parse(fs.readFileSync(IDENTITY_MAP_PATH, 'utf8'));
+  log(`Loaded identity map: ${Object.keys(identityMap).length} aliases`);
+} catch { /* no file = no mapping, original behavior */ }
+
+function resolveIdentity(id) {
+  return id ? (identityMap[id] || id) : id;
+}
+
 // Session management: maps session-key → { uuid, lastUsed }
 const sessions = new Map();
 const SESSION_TTL_MS = 3600 * 1000; // 1 hour
@@ -387,8 +402,11 @@ async function handleMessages(req, res) {
   // The inbound_meta block contains per-message fields (message_id, message_id_full,
   // reply_to_id, history_count, etc.) that must not affect session key computation.
   const sysTextStable = sysText.replace(/```json\n[\s\S]*?```/g, '');
+  // Resolve identity aliases (e.g. Signal → Telegram) so cross-channel messages share a session.
+  // Only the session key uses the canonical identity; chatId stays raw for channel-aware logging.
+  const canonicalIdentity = resolveIdentity(identity);
   const sessionKey = req.headers['x-session-key']
-    || crypto.createHash('md5').update((sysTextStable || 'default') + (identity ? '|' + identity : '')).digest('hex');
+    || crypto.createHash('md5').update((sysTextStable || 'default') + (canonicalIdentity ? '|' + canonicalIdentity : '')).digest('hex');
 
   log(`[${requestId}] sender=${sender} chatId=${chatId} sessionKey=${sessionKey.slice(0,8)} prompt="${prompt.slice(0, 80)}"`);
 
@@ -1485,11 +1503,11 @@ if (require.main === module) {
 module.exports = {
   parseSender, parseChatId, sessionKeyToUuid, generateMessageId,
   extractJsonObjects, mapModelName, writeImagesToTmp,
-  truncateSessionForRegenerate, gracefulShutdown,
+  truncateSessionForRegenerate, gracefulShutdown, resolveIdentity,
   _server: server,
   _internals: {
     sessions, activeRuns, sessionQueues, monitorClients,
     IDLE_TIMEOUT_MS, TOOL_IDLE_TIMEOUT_MS, COMPACTION_TIMEOUT_MS, SESSION_TTL_MS,
-    WORKSPACE, CLAUDE_CONFIG_DIR, CLAUDE_PATH, HOME
+    WORKSPACE, CLAUDE_CONFIG_DIR, CLAUDE_PATH, HOME, identityMap
   }
 };
