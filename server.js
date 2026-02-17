@@ -617,6 +617,7 @@ async function handleMessages(req, res) {
       log(`[${requestId}] Resume failed (${stderrBuf.trim().slice(0, 100)}), falling back to new session`);
       sessions.delete(sessionKey);
       isResume = false;
+      sessionUuid = sessionKeyToUuid(sessionKey + ':v' + Date.now());
       return spawnCli();
     }
 
