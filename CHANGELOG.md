@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.9.2](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.9.1...v0.9.2) (2026-02-17)
+
+
+### Bug Fixes
+
+* generate fresh UUID on resume fallback to avoid "Session ID already in use" ([43ac91f](https://github.com/alexkirienko/claude-cli-proxy/commit/43ac91fb3a871e29b74fd9b52f2641b9e5045aee))
+* include CLI stderr in error event when process exits without content ([8ac6f15](https://github.com/alexkirienko/claude-cli-proxy/commit/8ac6f15a07096ba92f0faf02af05bb1ebe89be81))
+* prevent silent failures when CLI retries exhaust and forward metadata on resume ([73acb80](https://github.com/alexkirienko/claude-cli-proxy/commit/73acb80c111bca20d98946327af737a2bcddada0))
+
 ## [0.9.1](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.9.0...v0.9.1) (2026-02-17)
 
 
