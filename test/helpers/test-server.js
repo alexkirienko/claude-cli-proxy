@@ -30,6 +30,9 @@ async function startTestServer() {
     mod._server.listen(port, '127.0.0.1', resolve);
   });
 
+  // Shorten early-exit race for tests so mock "real" spawns (closeDelay ~50ms) survive it
+  mod._internals.EARLY_EXIT_RACE_MS = 20;
+
   return {
     url: `http://127.0.0.1:${port}`,
     port,

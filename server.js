@@ -497,8 +497,13 @@ async function handleMessages(req, res) {
       args.push('--resume', sessionUuid);
       // Nudge the agent to re-read project instructions after compaction
       let appendPrompt = 'Remember: read CLAUDE.md project instructions. Check workspace files (SOUL.md, memory/) if context feels incomplete.';
-      if (chatId) {
-        const channel = chatId.split(':')[0];  // "telegram" or "signal"
+      // Forward the current request's metadata block so the AI knows the source channel.
+      // Uses the same JSON code fence format as OpenClaw's system prompt.
+      const metaMatch = sysText.match(/```json\n[\s\S]*?```/);
+      if (metaMatch) {
+        appendPrompt += `\n\nCurrent message context:\n${metaMatch[0]}`;
+      } else if (chatId) {
+        const channel = chatId.split(':')[0];
         appendPrompt += `\nCurrent channel: ${channel} (${chatId}).`;
       }
       args.push('--append-system-prompt', appendPrompt);
@@ -583,50 +588,77 @@ async function handleMessages(req, res) {
   // - --resume fail → fall back to --session-id (new session)
   // - other error → retry once (preserves JSONL)
   async function spawnWithRetry() {
-    const child = spawnCli();
-    let stderrBuf = '';
-    const onStderr = (d) => { stderrBuf += d; };
-    child.stderr.on('data', onStderr);
+    // Helper: wait up to EARLY_EXIT_RACE_MS to see if child exits early
+    async function raceEarlyExit(child) {
+      let stderrBuf = '';
+      const onStderr = (d) => { stderrBuf += d; };
+      child.stderr.on('data', onStderr);
+      const onError = () => {};
+      child.on('error', onError);
 
-    // Absorb 'error' events during the race to prevent unhandled exception
-    // (the response handler will attach its own error listener after we return)
-    const onError = () => {};
-    child.on('error', onError);
+      let raceTimer;
+      const earlyExit = await Promise.race([
+        new Promise(resolve => child.once('close', code => resolve({ exited: true, code }))),
+        new Promise(resolve => { raceTimer = setTimeout(() => resolve({ exited: false }), _internals.EARLY_EXIT_RACE_MS); }),
+      ]);
+      clearTimeout(raceTimer);
+      child.stderr.removeListener('data', onStderr);
+      child.removeListener('error', onError);
 
-    let raceTimer;
-    const earlyExit = await Promise.race([
-      new Promise(resolve => child.once('close', code => resolve({ exited: true, code }))),
-      new Promise(resolve => { raceTimer = setTimeout(() => resolve({ exited: false }), 3000); }),
-    ]);
-    clearTimeout(raceTimer);
-
-    child.stderr.removeListener('data', onStderr);
-    child.removeListener('error', onError);
-
-    if (!earlyExit.exited) return child; // still running → success
-
-    if (stderrBuf.includes('already in use')) {
-      // Session locked by ghost process — wait for it to release, then retry
-      log(`[${requestId}] Session locked, waiting for release...`);
-      await new Promise(r => setTimeout(r, 2000));
-      return spawnCli();
+      return { ...earlyExit, stderr: stderrBuf };
     }
 
-    if (isResume && earlyExit.code !== 0) {
-      // --resume failed (e.g. session not found) — fall back to new session
-      log(`[${requestId}] Resume failed (${stderrBuf.trim().slice(0, 100)}), falling back to new session`);
+    // Primary spawn
+    const child = spawnCli();
+    const result = await raceEarlyExit(child);
+    if (!result.exited) return child;
+
+    // Handle "already in use"
+    if (result.stderr.includes('already in use')) {
+      log(`[${requestId}] Session locked, waiting for release...`);
+      await new Promise(r => setTimeout(r, 2000));
+      const retry = spawnCli();
+      const retryResult = await raceEarlyExit(retry);
+      if (!retryResult.exited) return retry;
+      throw Object.assign(new Error(`CLI retry failed (code ${retryResult.code}): ${retryResult.stderr.trim().slice(0, 100)}`), { cliError: true });
+    }
+
+    // Handle resume failure
+    if (isResume && result.code !== 0) {
+      log(`[${requestId}] Resume failed (${result.stderr.trim().slice(0, 100)}), falling back to new session`);
       sessions.delete(sessionKey);
       isResume = false;
       sessionUuid = sessionKeyToUuid(sessionKey + ':v' + Date.now());
-      return spawnCli();
+      const retry = spawnCli();
+      const retryResult = await raceEarlyExit(retry);
+      if (!retryResult.exited) return retry;
+      throw Object.assign(new Error(`CLI fallback failed (code ${retryResult.code}): ${retryResult.stderr.trim().slice(0, 100)}`), { cliError: true });
     }
 
-    // Other error — retry once without clearing JSONL (preserves conversation history)
-    log(`[${requestId}] CLI exited early (code ${earlyExit.code}, stderr: ${stderrBuf.trim().slice(0, 100)}), retrying...`);
-    return spawnCli();
+    // Other early exit — retry once
+    log(`[${requestId}] CLI exited early (code ${result.code}, stderr: ${result.stderr.trim().slice(0, 100)}), retrying...`);
+    const retry = spawnCli();
+    const retryResult = await raceEarlyExit(retry);
+    if (!retryResult.exited) return retry;
+    throw Object.assign(new Error(`CLI retry failed (code ${retryResult.code}): ${retryResult.stderr.trim().slice(0, 100)}`), { cliError: true });
   }
 
-  const proc = await spawnWithRetry();
+  let proc;
+  try {
+    proc = await spawnWithRetry();
+  } catch (err) {
+    // All spawn retries exhausted — clean up queue and send error response
+    log(`[${requestId}] Spawn failed after retries:`, err.message);
+    cleanupImages();
+    resolveDone();
+    if (sessionQueues.get(sessionKey) === done) sessionQueues.delete(sessionKey);
+    if (!res.headersSent) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { type: 'api_error', message: err.message } }));
+    }
+    return;
+  }
+
   activeRuns.set(sessionKey, { child: proc, requestId, done, resolveDone, isPriority, sender });
 
   try {
@@ -692,6 +724,7 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
     textSent: false,  // Track if text was already sent via text_delta streaming
     toolExecuting: false,  // true from tool_use start until next text/thinking block
     compacting: false,     // true from compact_boundary until next content block
+    messageDeltaSent: false,  // true once CLI sends message_delta via streaming
   };
 
   // Idle timeout - kill child if no output for configured period
@@ -801,6 +834,17 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
     if (responseEnded) return;
     responseEnded = true;
 
+    // If CLI failed without producing any content, send an error event
+    if (code !== 0 && contentBlocks.length === 0) {
+      sendSSE(res, 'error', {
+        type: 'error',
+        error: { type: 'api_error', message: 'CLI process exited without producing content' }
+      });
+      setTimeout(() => { res.end(); }, 10);
+      log(`[${requestId}] Completed with error (code ${code}): 0 tokens, 0 blocks`);
+      return;
+    }
+
     // Close any open non-tool_use content blocks visible to gateway
     if ((state.thinking || state.textStarted) && !insideToolUseBlock) {
       sendSSE(res, 'content_block_stop', {
@@ -809,12 +853,14 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
       });
     }
 
-    // Send message_delta with stop_reason
-    sendSSE(res, 'message_delta', {
-      type: 'message_delta',
-      delta: { stop_reason: 'end_turn', stop_sequence: null },
-      usage: { output_tokens: outputTokens }
-    });
+    // Send message_delta with stop_reason — only if CLI didn't already send one
+    if (!state.messageDeltaSent) {
+      sendSSE(res, 'message_delta', {
+        type: 'message_delta',
+        delta: { stop_reason: 'end_turn', stop_sequence: null },
+        usage: { output_tokens: outputTokens }
+      });
+    }
 
     // Give time for final SSE events to flush before ending the response
     setTimeout(() => {
@@ -1005,6 +1051,7 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
       if (e.usage) {
         outputTokens = e.usage.output_tokens || 0;
       }
+      state.messageDeltaSent = true;
       sendSSE(res, 'message_delta', {
         type: 'message_delta',
         delta: e.delta,
@@ -1510,14 +1557,17 @@ if (require.main === module) {
   });
 }
 
+const _internals = {
+  sessions, activeRuns, sessionQueues, monitorClients,
+  IDLE_TIMEOUT_MS, TOOL_IDLE_TIMEOUT_MS, COMPACTION_TIMEOUT_MS, SESSION_TTL_MS,
+  WORKSPACE, CLAUDE_CONFIG_DIR, CLAUDE_PATH, HOME, identityMap,
+  EARLY_EXIT_RACE_MS: 3000,
+};
+
 module.exports = {
   parseSender, parseChatId, sessionKeyToUuid, generateMessageId,
   extractJsonObjects, mapModelName, writeImagesToTmp,
   truncateSessionForRegenerate, gracefulShutdown, resolveIdentity,
   _server: server,
-  _internals: {
-    sessions, activeRuns, sessionQueues, monitorClients,
-    IDLE_TIMEOUT_MS, TOOL_IDLE_TIMEOUT_MS, COMPACTION_TIMEOUT_MS, SESSION_TTL_MS,
-    WORKSPACE, CLAUDE_CONFIG_DIR, CLAUDE_PATH, HOME, identityMap
-  }
+  _internals,
 };
