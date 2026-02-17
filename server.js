@@ -147,6 +147,19 @@ function generateMessageId() {
 }
 
 /**
+ * Kill a child process with SIGTERM, escalating to SIGKILL after 5s if needed.
+ */
+function killChild(child, requestId) {
+  child.kill('SIGTERM');
+  setTimeout(() => {
+    if (child.exitCode === null && child.signalCode === null) {
+      log(`[${requestId}] Child did not exit after SIGTERM, sending SIGKILL`);
+      child.kill('SIGKILL');
+    }
+  }, 5000);
+}
+
+/**
  * Send SSE event in Anthropic format
  */
 function sendSSE(res, eventType, data) {
@@ -193,7 +206,7 @@ function writeImagesToTmp(contentBlocks, requestId) {
   for (let i = 0; i < images.length; i++) {
     const img = images[i];
     const rawExt = (img.source.media_type || 'image/png').split('/')[1] || 'png';
-    const ext = rawExt.split('+')[0]; // "svg+xml" → "svg"
+    const ext = rawExt.split('+')[0].replace(/[^a-zA-Z0-9]/g, '') || 'png'; // "svg+xml" → "svg"
     const filePath = path.join(tmpDir, `image-${i + 1}.${ext}`);
     fs.writeFileSync(filePath, Buffer.from(img.source.data, 'base64'));
     paths.push(filePath);
@@ -295,16 +308,19 @@ function extractJsonObjects(buffer) {
         if (braceCount === 0) startIndex = i;
         braceCount++;
       } else if (char === '}') {
-        braceCount--;
-        if (braceCount === 0) {
-          const jsonStr = buffer.slice(startIndex, i + 1);
-          try {
-            objects.push(JSON.parse(jsonStr));
-          } catch (e) {
-            // Skip unparseable JSON
+        if (braceCount > 0) {
+          braceCount--;
+          if (braceCount === 0) {
+            const jsonStr = buffer.slice(startIndex, i + 1);
+            try {
+              objects.push(JSON.parse(jsonStr));
+            } catch (e) {
+              // Skip unparseable JSON
+            }
+            startIndex = i + 1;
           }
-          startIndex = i + 1;
         }
+        // stray } when braceCount===0: ignore it
       }
     }
   }
@@ -319,16 +335,20 @@ const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10 MB
 
 async function handleMessages(req, res) {
   const requestId = generateMessageId();
-  let body = '';
+  const chunks = [];
+  let bodyLen = 0;
 
   for await (const chunk of req) {
-    body += chunk;
-    if (body.length > MAX_BODY_SIZE) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    chunks.push(buf);
+    bodyLen += buf.length;
+    if (bodyLen > MAX_BODY_SIZE) {
       res.writeHead(413, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: { type: 'invalid_request', message: 'Request body too large' } }));
       return;
     }
   }
+  const body = Buffer.concat(chunks).toString('utf8');
 
   let request;
   try {
@@ -539,6 +559,7 @@ async function handleMessages(req, res) {
       stdio: ['pipe', 'pipe', 'pipe']
     });
 
+    child.stdin.on('error', () => {}); // Prevent EPIPE crash if child exits early
     child.stdin.write(prompt);
     child.stdin.end();
 
@@ -561,9 +582,12 @@ async function handleMessages(req, res) {
     }
   }
 
-  // Handle client disconnect while queued (prevent queue hang)
+  // Handle client disconnect while queued — only set flag, don't resolve the queue
+  // promise. The cancelled request will wait its turn, then hand off the lock after
+  // prevTail resolves, preventing downstream waiters from waking while the active
+  // run is still executing.
   let cancelled = false;
-  const onDisconnect = () => { cancelled = true; resolveDone(); };
+  const onDisconnect = () => { cancelled = true; };
   req.on('close', onDisconnect);
 
   if (prevTail) {
@@ -577,7 +601,7 @@ async function handleMessages(req, res) {
   // a microtask continuation after await, but destroyed is set immediately.
   if (cancelled || req.socket?.destroyed) {
     log(`[${requestId}] Client disconnected while queued, skipping`);
-    if (!cancelled) resolveDone(); // close event hasn't fired yet, manually resolve
+    resolveDone(); // hand off lock here, after our turn
     if (sessionQueues.get(sessionKey) === done) sessionQueues.delete(sessionKey);
     cleanupImages();
     return;
@@ -611,7 +635,10 @@ async function handleMessages(req, res) {
     // Primary spawn
     const child = spawnCli();
     const result = await raceEarlyExit(child);
-    if (!result.exited) return child;
+    if (!result.exited) {
+      child.initialStderr = result.stderr;
+      return child;
+    }
 
     // Handle "already in use"
     if (result.stderr.includes('already in use')) {
@@ -619,7 +646,10 @@ async function handleMessages(req, res) {
       await new Promise(r => setTimeout(r, 2000));
       const retry = spawnCli();
       const retryResult = await raceEarlyExit(retry);
-      if (!retryResult.exited) return retry;
+      if (!retryResult.exited) {
+        retry.initialStderr = retryResult.stderr;
+        return retry;
+      }
       throw Object.assign(new Error(`CLI retry failed (code ${retryResult.code}): ${retryResult.stderr.trim().slice(0, 100)}`), { cliError: true });
     }
 
@@ -631,7 +661,10 @@ async function handleMessages(req, res) {
       sessionUuid = sessionKeyToUuid(sessionKey + ':v' + Date.now());
       const retry = spawnCli();
       const retryResult = await raceEarlyExit(retry);
-      if (!retryResult.exited) return retry;
+      if (!retryResult.exited) {
+        retry.initialStderr = retryResult.stderr;
+        return retry;
+      }
       throw Object.assign(new Error(`CLI fallback failed (code ${retryResult.code}): ${retryResult.stderr.trim().slice(0, 100)}`), { cliError: true });
     }
 
@@ -639,7 +672,10 @@ async function handleMessages(req, res) {
     log(`[${requestId}] CLI exited early (code ${result.code}, stderr: ${result.stderr.trim().slice(0, 100)}), retrying...`);
     const retry = spawnCli();
     const retryResult = await raceEarlyExit(retry);
-    if (!retryResult.exited) return retry;
+    if (!retryResult.exited) {
+      retry.initialStderr = retryResult.stderr;
+      return retry;
+    }
     throw Object.assign(new Error(`CLI retry failed (code ${retryResult.code}): ${retryResult.stderr.trim().slice(0, 100)}`), { cliError: true });
   }
 
@@ -739,7 +775,7 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
     idleTimeout = setTimeout(() => {
       log(`[${requestId}] Idle timeout (${timeoutMs}ms, toolExecuting=${state.toolExecuting}), killing child`);
       emitMonitorEvent('cli_timeout', { requestId, type: 'idle', toolExecuting: state.toolExecuting });
-      child.kill('SIGTERM');
+      killChild(child, requestId);
     }, timeoutMs);
   };
   resetIdleTimeout();
@@ -751,14 +787,7 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
     clientDisconnected = true;
     log(`[${requestId}] Client disconnected, killing child`);
     clearTimeout(idleTimeout);
-    child.kill('SIGTERM');
-    // Force-kill if SIGTERM is ignored (prevents queue deadlock)
-    setTimeout(() => {
-      if (child.exitCode === null && child.signalCode === null) {
-        log(`[${requestId}] Child did not exit after SIGTERM, sending SIGKILL`);
-        child.kill('SIGKILL');
-      }
-    }, 5000);
+    killChild(child, requestId);
   };
   req.on('close', onClientClose);
   res.on('close', onClientClose);
@@ -798,7 +827,7 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
     }
   });
 
-  let stderrBuf = '';
+  let stderrBuf = child.initialStderr || '';
   child.stderr.on('data', (data) => {
     const stderr = data.toString();
     stderrBuf += stderr;
@@ -1228,7 +1257,7 @@ async function handleNonStreamingResponse(req, res, child, model, requestId, ses
   let idleTimeout = setTimeout(() => {
     log(`[${requestId}] Non-streaming idle timeout (${TOOL_IDLE_TIMEOUT_MS}ms), killing child`);
     emitMonitorEvent('cli_timeout', { requestId, type: 'idle', streaming: false });
-    child.kill('SIGTERM');
+    killChild(child, requestId);
   }, TOOL_IDLE_TIMEOUT_MS);
 
   // Handle client disconnect — kill child to free resources and unblock queue
@@ -1238,14 +1267,7 @@ async function handleNonStreamingResponse(req, res, child, model, requestId, ses
     clientDisconnected = true;
     log(`[${requestId}] Non-streaming client disconnected, killing child`);
     clearTimeout(idleTimeout);
-    child.kill('SIGTERM');
-    // Force-kill if SIGTERM is ignored (prevents queue deadlock)
-    setTimeout(() => {
-      if (child.exitCode === null && child.signalCode === null) {
-        log(`[${requestId}] Child did not exit after SIGTERM, sending SIGKILL`);
-        child.kill('SIGKILL');
-      }
-    }, 5000);
+    killChild(child, requestId);
   };
   req.on('close', onClientClose);
   res.on('close', onClientClose);
@@ -1257,7 +1279,7 @@ async function handleNonStreamingResponse(req, res, child, model, requestId, ses
     idleTimeout = setTimeout(() => {
       log(`[${requestId}] Non-streaming idle timeout (${TOOL_IDLE_TIMEOUT_MS}ms), killing child`);
       emitMonitorEvent('cli_timeout', { requestId, type: 'idle', streaming: false });
-      child.kill('SIGTERM');
+      killChild(child, requestId);
     }, TOOL_IDLE_TIMEOUT_MS);
   });
   child.stderr.on('data', (data) => {
@@ -1398,8 +1420,10 @@ function handleMonitorEvents(req, res) {
  * Handle GitHub webhook deploy trigger
  */
 async function handleDeploy(req, res) {
-  let body = '';
-  for await (const chunk of req) body += chunk;
+  const chunks = [];
+  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  const bodyBuf = Buffer.concat(chunks);
+  const body = bodyBuf.toString('utf8');
 
   // Validate HMAC-SHA256 signature
   if (!DEPLOY_SECRET) {
@@ -1410,7 +1434,7 @@ async function handleDeploy(req, res) {
   }
 
   const sig = req.headers['x-hub-signature-256'] || '';
-  const expected = 'sha256=' + crypto.createHmac('sha256', DEPLOY_SECRET).update(body).digest('hex');
+  const expected = 'sha256=' + crypto.createHmac('sha256', DEPLOY_SECRET).update(bodyBuf).digest('hex');
   const sigBuf = Buffer.from(sig);
   const expectedBuf = Buffer.from(expected);
   if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
@@ -1425,9 +1449,9 @@ async function handleDeploy(req, res) {
   let payload;
   try { payload = JSON.parse(body); } catch { payload = {}; }
 
-  if (event === 'push' && payload.ref !== 'refs/heads/main') {
+  if (event !== 'push' || payload.ref !== 'refs/heads/main') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'skipped', reason: 'not main branch' }));
+    res.end(JSON.stringify({ status: 'skipped', reason: event !== 'push' ? `event: ${event}` : 'not main branch' }));
     return;
   }
 
@@ -1570,7 +1594,7 @@ const _internals = {
 module.exports = {
   parseSender, parseChatId, sessionKeyToUuid, generateMessageId,
   extractJsonObjects, mapModelName, writeImagesToTmp,
-  truncateSessionForRegenerate, gracefulShutdown, resolveIdentity,
+  truncateSessionForRegenerate, gracefulShutdown, resolveIdentity, killChild,
   _server: server,
   _internals,
 };
