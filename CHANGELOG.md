@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.9.0...v0.9.1) (2026-02-17)
+
+
+### Bug Fixes
+
+* cross-channel session merging when system prompts differ per channel ([678f2c4](https://github.com/alexkirienko/claude-cli-proxy/commit/678f2c4d0f47d856589c139cd3b34f7724c4eb40))
+
 ## [0.9.0](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.8.3...v0.9.0) (2026-02-17)
 
 
