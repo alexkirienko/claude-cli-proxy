@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.5](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.9.4...v0.9.5) (2026-02-18)
+
+
+### Bug Fixes
+
+* remove SESSION_TTL_MS to prevent session eviction overnight ([06bb723](https://github.com/alexkirienko/claude-cli-proxy/commit/06bb723a91eae615f1d4417375aedcba73a122c2))
+
 ## [0.9.4](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.9.3...v0.9.4) (2026-02-17)
 
 
