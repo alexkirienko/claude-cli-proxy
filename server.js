@@ -47,8 +47,6 @@ try {
   identityMap = JSON.parse(fs.readFileSync(IDENTITY_MAP_PATH, 'utf8'));
   log(`Loaded identity map: ${Object.keys(identityMap).length} aliases`);
 } catch { /* no file = no mapping, original behavior */ }
-// Set of all canonical identities that are targets of at least one alias
-const mergeTargets = new Set(Object.values(identityMap));
 
 function resolveIdentity(id) {
   return id ? (identityMap[id] || id) : id;
@@ -436,7 +434,7 @@ async function handleMessages(req, res) {
   const canonicalIdentity = resolveIdentity(identity);
   // Cross-channel merge: skip sysTextStable when identity participates in a mapping
   // (either as an alias key or as the canonical target of another alias)
-  const isMerged = canonicalIdentity && (canonicalIdentity !== identity || mergeTargets.has(identity));
+  const isMerged = canonicalIdentity && (canonicalIdentity !== identity || Object.values(identityMap).includes(identity));
   const sessionKey = req.headers['x-session-key']
     || crypto.createHash('md5').update(
          isMerged
