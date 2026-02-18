@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.10.0...v0.11.0) (2026-02-18)
+
+
+### Features
+
+* graceful shutdown — drain active CLI processes before exiting ([5682ad2](https://github.com/alexkirienko/claude-cli-proxy/commit/5682ad285064ef597eb0286258f8b8cf55130bfc))
+
 ## [0.10.0](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.9.6...v0.10.0) (2026-02-18)
 
 
