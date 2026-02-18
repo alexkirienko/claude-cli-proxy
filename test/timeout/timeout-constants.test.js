@@ -25,10 +25,6 @@ describe('Timeout: constants', () => {
     assert.strictEqual(internals.COMPACTION_TIMEOUT_MS, 600000);
   });
 
-  it('SESSION_TTL_MS is 3600 seconds (1 hour)', () => {
-    assert.strictEqual(internals.SESSION_TTL_MS, 3600000);
-  });
-
   it('TOOL_IDLE_TIMEOUT_MS is greater than IDLE_TIMEOUT_MS', () => {
     assert.ok(
       internals.TOOL_IDLE_TIMEOUT_MS > internals.IDLE_TIMEOUT_MS,

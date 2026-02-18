@@ -56,7 +56,6 @@ function resolveIdentity(id) {
 
 // Session management: maps session-key → { uuid, lastUsed }
 const sessions = new Map();
-const SESSION_TTL_MS = 3600 * 1000; // 1 hour
 const SESSIONS_FILE = path.join(path.dirname(WORKSPACE), 'sessions.json');
 
 // Load persisted sessions from disk
@@ -103,21 +102,6 @@ function sessionKeyToUuid(key) {
           '8'+hash.slice(17,20), hash.slice(20,32)].join('-');
 }
 
-// Periodic cleanup every 10 minutes (only when running as main)
-if (require.main === module) {
-  setInterval(() => {
-    const now = Date.now();
-    let evicted = 0;
-    for (const [key, info] of sessions) {
-      if (now - info.lastUsed > SESSION_TTL_MS) {
-        log(`[session] Evicting expired session: ${key.slice(0, 8)}...`);
-        sessions.delete(key);
-        evicted++;
-      }
-    }
-    if (evicted) persistSessions();
-  }, 600_000);
-}
 
 // Detect Claude CLI version at startup (only when running as main)
 let cliVersion = 'unknown';
@@ -1612,7 +1596,7 @@ if (require.main === module) {
 
 const _internals = {
   sessions, activeRuns, sessionQueues, monitorClients,
-  IDLE_TIMEOUT_MS, TOOL_IDLE_TIMEOUT_MS, COMPACTION_TIMEOUT_MS, SESSION_TTL_MS,
+  IDLE_TIMEOUT_MS, TOOL_IDLE_TIMEOUT_MS, COMPACTION_TIMEOUT_MS,
   WORKSPACE, CLAUDE_CONFIG_DIR, CLAUDE_PATH, HOME, identityMap,
   SESSIONS_FILE, EARLY_EXIT_RACE_MS: 3000,
 };
