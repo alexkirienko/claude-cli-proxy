@@ -1657,13 +1657,40 @@ server.on('error', (err) => {
   process.exit(1);
 });
 
-// Graceful shutdown: kill all tracked CLI children to prevent orphans
+// Graceful shutdown: drain active CLI processes before exiting
 function gracefulShutdown(signal) {
-  log(`Received ${signal}, killing ${activeRuns.size} active CLI processes...`);
-  for (const [key, entry] of activeRuns) {
-    entry.child.kill('SIGTERM');
+  log(`Received ${signal}, draining ${activeRuns.size} active CLI processes...`);
+
+  // Stop accepting new connections
+  server.close();
+
+  if (activeRuns.size === 0) {
+    log('No active runs, exiting immediately');
+    process.exit(0);
+    return;
   }
-  setTimeout(() => process.exit(0), 2000);
+
+  // Set a hard deadline — don't block restart forever
+  const DRAIN_TIMEOUT_MS = 120_000; // 2 minutes max drain
+  const deadline = setTimeout(() => {
+    log(`Drain timeout (${DRAIN_TIMEOUT_MS}ms), force-killing ${activeRuns.size} remaining CLI processes`);
+    for (const [key, entry] of activeRuns) {
+      entry.child.kill('SIGTERM');
+    }
+    setTimeout(() => process.exit(0), 2000);
+  }, DRAIN_TIMEOUT_MS);
+  deadline.unref();
+
+  // Check periodically if all runs completed naturally
+  const checkInterval = setInterval(() => {
+    if (activeRuns.size === 0) {
+      clearInterval(checkInterval);
+      clearTimeout(deadline);
+      log('All CLI processes completed, exiting');
+      process.exit(0);
+    }
+  }, 500);
+  checkInterval.unref();
 }
 if (require.main === module) {
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
