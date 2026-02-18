@@ -280,6 +280,47 @@ function truncateSessionForRegenerate(jsonlPath, newUuid, cwdSlug) {
 }
 
 /**
+ * Extract usable context from an old session's JSONL for recovery after resume failure.
+ * Looks for compact summaries first (best context), falls back to recent exchanges.
+ * Returns a string of recovered context, or null if nothing usable.
+ */
+function extractRecoveryContext(jsonlPath) {
+  let lines;
+  try {
+    lines = fs.readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean);
+  } catch { return null; }
+
+  const safeParse = (line) => { try { return JSON.parse(line); } catch { return null; } };
+
+  // 1. Look for last compact summary (most complete context)
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const entry = safeParse(lines[i]);
+    if (entry?.type === 'user'
+        && typeof entry.message?.content === 'string'
+        && entry.message.content.startsWith('This session is being continued')) {
+      // Cap at 8K chars to avoid blowing up the system prompt
+      return entry.message.content.slice(0, 8192);
+    }
+  }
+
+  // 2. No compact summary — extract last N user/assistant exchanges
+  const recent = [];
+  for (let i = lines.length - 1; i >= 0 && recent.length < 10; i--) {
+    const entry = safeParse(lines[i]);
+    if (!entry) continue;
+    if (entry.type === 'user' && typeof entry.message?.content === 'string') {
+      recent.unshift('User: ' + entry.message.content.slice(0, 300));
+    } else if (entry.type === 'assistant' && Array.isArray(entry.message?.content)) {
+      const text = entry.message.content.find(b => b.type === 'text')?.text;
+      if (text) recent.unshift('Assistant: ' + text.slice(0, 300));
+    }
+  }
+  return recent.length > 0
+    ? 'Previous conversation excerpt:\n' + recent.join('\n')
+    : null;
+}
+
+/**
  * Extract complete JSON objects from a buffer using brace counting.
  * Returns { objects: parsed[], remainder: string }
  */
@@ -465,6 +506,10 @@ async function handleMessages(req, res) {
       debug(`[${requestId}] Regenerating: forked session to ${regenUuid.slice(0, 8)}`);
     }
   }
+
+  // Recovery state: set when --resume fails and we fall back to a new session
+  let resumeFailed = false;
+  let recoveredContext = null;
 
   // Map model names
   let cliModel = mapModelName(model);
@@ -661,10 +706,25 @@ async function handleMessages(req, res) {
     // Handle resume failure
     if (isResume && result.code !== 0) {
       log(`[${requestId}] Resume failed (${result.stderr.trim().slice(0, 100)}), falling back to new session`);
+      const oldUuid = sessionUuid;
       sessions.delete(sessionKey);
       persistSessions();
       isResume = false;
+      resumeFailed = true;
       sessionUuid = sessionKeyToUuid(sessionKey + ':v' + Date.now());
+
+      // Try to recover context from old session's JSONL
+      const oldJsonlPath = path.join(
+        CLAUDE_CONFIG_DIR, 'projects', cwdSlug, `${oldUuid}.jsonl`
+      );
+      recoveredContext = extractRecoveryContext(oldJsonlPath);
+      if (recoveredContext) {
+        sysText += '\n\n--- Recovered from previous session ---\n' + recoveredContext;
+        log(`[${requestId}] Recovered ${recoveredContext.length} chars from old session ${oldUuid.slice(0, 8)}`);
+      } else {
+        log(`[${requestId}] No recoverable context from old session ${oldUuid.slice(0, 8)}`);
+      }
+
       const retry = spawnCli();
       const retryResult = await raceEarlyExit(retry);
       if (!retryResult.exited) {
@@ -704,10 +764,11 @@ async function handleMessages(req, res) {
   activeRuns.set(sessionKey, { child: proc, requestId, done, resolveDone, isPriority, sender });
 
   try {
+    const recoveryInfo = resumeFailed ? { resumeFailed, recoveredContext } : null;
     if (stream) {
-      await handleStreamingResponse(req, res, proc, model, requestId, sessionKey, imagePaths, sessionUuid);
+      await handleStreamingResponse(req, res, proc, model, requestId, sessionKey, imagePaths, sessionUuid, recoveryInfo);
     } else {
-      await handleNonStreamingResponse(req, res, proc, model, requestId, sessionKey, imagePaths, sessionUuid);
+      await handleNonStreamingResponse(req, res, proc, model, requestId, sessionKey, imagePaths, sessionUuid, recoveryInfo);
     }
   } catch (err) {
     // If handler setup throws (e.g., socket destroyed before listeners attach),
@@ -730,7 +791,7 @@ async function handleMessages(req, res) {
 /**
  * Handle streaming response with full Anthropic event compatibility
  */
-async function handleStreamingResponse(req, res, child, model, requestId, sessionKey, imagePaths, sessionUuid) {
+async function handleStreamingResponse(req, res, child, model, requestId, sessionKey, imagePaths, sessionUuid, recoveryInfo) {
   const cleanupImages = () => {
     if (imagePaths.length > 0) {
       const tmpDir = path.dirname(imagePaths[0]);
@@ -812,6 +873,28 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
     }
   });
   state.messageStarted = true;
+
+  // Inject resume-failure notification into SSE stream
+  if (recoveryInfo?.resumeFailed) {
+    sseBlockIndex++;
+    sendSSE(res, 'content_block_start', {
+      type: 'content_block_start',
+      index: sseBlockIndex,
+      content_block: { type: 'text', text: '' }
+    });
+    const noticeText = recoveryInfo.recoveredContext
+      ? '--- Session Resumed from Summary ---\nThe previous session could not be resumed directly. Context was recovered from the session history. Some details may be missing.'
+      : '--- New Session ---\nPrevious conversation could not be recovered. Starting fresh.';
+    sendSSE(res, 'content_block_delta', {
+      type: 'content_block_delta',
+      index: sseBlockIndex,
+      delta: { type: 'text_delta', text: noticeText }
+    });
+    sendSSE(res, 'content_block_stop', {
+      type: 'content_block_stop',
+      index: sseBlockIndex
+    });
+  }
 
   // Process CLI stream events
   let buffer = '';
@@ -1155,12 +1238,11 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
           index: sseBlockIndex,
           content_block: { type: 'text', text: '' }
         });
-        const triggerLabel = meta.trigger === 'manual' ? 'Manual' : 'Auto';
         const tokensLabel = meta.pre_tokens ? ` (${meta.pre_tokens} tokens)` : '';
         sendSSE(res, 'content_block_delta', {
           type: 'content_block_delta',
           index: sseBlockIndex,
-          delta: { type: 'text_delta', text: `[${triggerLabel} context compaction${tokensLabel} — summarizing conversation history...]` }
+          delta: { type: 'text_delta', text: `--- Context Compaction${tokensLabel} ---\nConversation history has been summarized. Earlier messages are now compressed.\nIf I seem to have forgotten specific details, please remind me.` }
         });
         sendSSE(res, 'content_block_stop', {
           type: 'content_block_stop',
@@ -1247,7 +1329,7 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
 /**
  * Handle non-streaming response
  */
-async function handleNonStreamingResponse(req, res, child, model, requestId, sessionKey, imagePaths, sessionUuid) {
+async function handleNonStreamingResponse(req, res, child, model, requestId, sessionKey, imagePaths, sessionUuid, recoveryInfo) {
   const cleanupImages = () => {
     if (imagePaths.length > 0) {
       const tmpDir = path.dirname(imagePaths[0]);
@@ -1347,12 +1429,20 @@ async function handleNonStreamingResponse(req, res, child, model, requestId, ses
     }
 
     try {
+      let resultText = (result.result || '').replace(GATEWAY_TAG_RE, '');
+      // Prepend recovery notice for non-streaming responses
+      if (recoveryInfo?.resumeFailed) {
+        const notice = recoveryInfo.recoveredContext
+          ? '--- Session Resumed from Summary ---\nContext was recovered from the session history. Some details may be missing.\n\n'
+          : '--- New Session ---\nPrevious conversation could not be recovered. Starting fresh.\n\n';
+        resultText = notice + resultText;
+      }
       const response = {
         id: requestId,
         type: 'message',
         role: 'assistant',
         model: model,
-        content: [{ type: 'text', text: (result.result || '').replace(GATEWAY_TAG_RE, '') }],
+        content: [{ type: 'text', text: resultText }],
         stop_reason: 'end_turn',
         stop_sequence: null,
         usage: {
@@ -1602,7 +1692,8 @@ const _internals = {
 module.exports = {
   parseSender, parseChatId, sessionKeyToUuid, generateMessageId,
   extractJsonObjects, mapModelName, writeImagesToTmp,
-  truncateSessionForRegenerate, gracefulShutdown, resolveIdentity, killChild, persistSessions,
+  truncateSessionForRegenerate, extractRecoveryContext,
+  gracefulShutdown, resolveIdentity, killChild, persistSessions,
   _server: server,
   _internals,
 };
