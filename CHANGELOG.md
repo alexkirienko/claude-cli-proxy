@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.9.6...v0.10.0) (2026-02-18)
+
+
+### Features
+
+* recover session context from JSONL on resume failure ([3f90e32](https://github.com/alexkirienko/claude-cli-proxy/commit/3f90e329f52ce6c0e2194a1a9739c5ff685ae84a))
+
 ## [0.9.6](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.9.5...v0.9.6) (2026-02-18)
 
 
