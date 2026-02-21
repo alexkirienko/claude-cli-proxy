@@ -469,7 +469,10 @@ async function handleMessages(req, res) {
   // Strip dynamic metadata blocks (JSON code fences) from system prompt for stable hashing.
   // The inbound_meta block contains per-message fields (message_id, message_id_full,
   // reply_to_id, history_count, etc.) that must not affect session key computation.
-  const sysTextStable = sysText.replace(/```json\n[\s\S]*?```/g, '');
+  const sysTextStable = sysText
+    .replace(/```json\n[\s\S]*?```/g, '')
+    .replace(/^Current time.*$/gm, '')
+    .replace(/^Remember the current location.*$/gm, '');
   // Resolve identity aliases (e.g. Signal → Telegram) so cross-channel messages share a session.
   // Only the session key uses the canonical identity; chatId stays raw for channel-aware logging.
   const canonicalIdentity = resolveIdentity(identity);

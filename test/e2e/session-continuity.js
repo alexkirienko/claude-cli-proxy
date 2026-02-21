@@ -90,7 +90,10 @@ function sendMessage(chatId, messageId, text, opts = {}) {
   const chatIdMatch = sysPrompt.match(/"chat_id"\s*:\s*"([^"]+)"/);
   const proxyChatId = chatIdMatch ? chatIdMatch[1] : null;
   const identity = sender || proxyChatId;
-  const sysTextStable = sysPrompt.replace(/```json\n[\s\S]*?```/g, '');
+  const sysTextStable = sysPrompt
+    .replace(/```json\n[\s\S]*?```/g, '')
+    .replace(/^Current time.*$/gm, '')
+    .replace(/^Remember the current location.*$/gm, '');
   const sessionKey = crypto.createHash('md5')
     .update((sysTextStable || 'default') + (identity ? '|' + identity : ''))
     .digest('hex');
