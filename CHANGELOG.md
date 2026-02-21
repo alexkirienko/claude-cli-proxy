@@ -5,6 +5,13 @@
 
 ### Bug Fixes
 
+* pick most recent session on ambiguous identity migration ([d17e0c0](https://github.com/alexkirienko/claude-cli-proxy/commit/d17e0c0f42c6955e9d78389dc015ccaa4ab94603))
+
+## [0.11.3](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.11.2...v0.11.3) (2026-02-21)
+
+
+### Bug Fixes
+
 * pick most recent session on ambiguous identity migration
 
 ## [0.11.2](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.11.1...v0.11.2) (2026-02-21)
