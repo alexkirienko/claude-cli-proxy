@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.1](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.11.0...v0.11.1) (2026-02-21)
+
+
+### Bug Fixes
+
+* strip dynamic time/location lines from session key hash ([f6e993e](https://github.com/alexkirienko/claude-cli-proxy/commit/f6e993efe8c7ac9acc6fc29cfb5727c74dd15fc8))
+
 ## [0.11.0](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.10.0...v0.11.0) (2026-02-18)
 
 
