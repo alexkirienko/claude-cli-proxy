@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.2](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.11.1...v0.11.2) (2026-02-21)
+
+
+### Bug Fixes
+
+* migrate sessions by identity when session key changes ([0dd82a3](https://github.com/alexkirienko/claude-cli-proxy/commit/0dd82a3be749bb717c3aa466466db62b2aa4ebf1))
+
 ## [0.11.1](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.11.0...v0.11.1) (2026-02-21)
 
 
