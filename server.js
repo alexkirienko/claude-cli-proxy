@@ -498,6 +498,23 @@ async function handleMessages(req, res) {
   );
   let isResume = sessions.has(sessionKey) || fs.existsSync(sessionJsonlPath);
 
+  // Identity-based fallback: when session key changed (e.g. after deploy) but
+  // the same identity has an existing session under an old key, migrate it.
+  if (!isResume && canonicalIdentity) {
+    for (const [oldKey, entry] of sessions) {
+      if (entry.identity === canonicalIdentity && oldKey !== sessionKey) {
+        sessionUuid = entry.uuid;
+        sessionJsonlPath = path.join(CLAUDE_CONFIG_DIR, 'projects', cwdSlug, `${sessionUuid}.jsonl`);
+        sessions.set(sessionKey, { ...entry, lastUsed: Date.now() });
+        sessions.delete(oldKey);
+        persistSessions();
+        isResume = true;
+        log(`[${requestId}] Migrated session ${oldKey.slice(0,8)} → ${sessionKey.slice(0,8)} (identity: ${canonicalIdentity})`);
+        break;
+      }
+    }
+  }
+
   // Session regeneration: fork to new UUID with truncated history
   const isRegenerate = req.headers['x-regenerate'] === 'true';
   if (isRegenerate && isResume) {
@@ -769,9 +786,9 @@ async function handleMessages(req, res) {
   try {
     const recoveryInfo = resumeFailed ? { resumeFailed, recoveredContext } : null;
     if (stream) {
-      await handleStreamingResponse(req, res, proc, model, requestId, sessionKey, imagePaths, sessionUuid, recoveryInfo);
+      await handleStreamingResponse(req, res, proc, model, requestId, sessionKey, imagePaths, sessionUuid, recoveryInfo, canonicalIdentity);
     } else {
-      await handleNonStreamingResponse(req, res, proc, model, requestId, sessionKey, imagePaths, sessionUuid, recoveryInfo);
+      await handleNonStreamingResponse(req, res, proc, model, requestId, sessionKey, imagePaths, sessionUuid, recoveryInfo, canonicalIdentity);
     }
   } catch (err) {
     // If handler setup throws (e.g., socket destroyed before listeners attach),
@@ -794,7 +811,7 @@ async function handleMessages(req, res) {
 /**
  * Handle streaming response with full Anthropic event compatibility
  */
-async function handleStreamingResponse(req, res, child, model, requestId, sessionKey, imagePaths, sessionUuid, recoveryInfo) {
+async function handleStreamingResponse(req, res, child, model, requestId, sessionKey, imagePaths, sessionUuid, recoveryInfo, canonicalIdentity) {
   const cleanupImages = () => {
     if (imagePaths.length > 0) {
       const tmpDir = path.dirname(imagePaths[0]);
@@ -947,7 +964,7 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
 
     // Track session on success (use actual sessionUuid, which may be a regen fork)
     if (code === 0 && sessionKey) {
-      sessions.set(sessionKey, { uuid: sessionUuid, lastUsed: Date.now() });
+      sessions.set(sessionKey, { uuid: sessionUuid, lastUsed: Date.now(), identity: canonicalIdentity });
       persistSessions();
       log(`[${requestId}] Session saved: ${sessionKey.slice(0, 8)}... (${sessions.size} active)`);
     }
@@ -1332,7 +1349,7 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
 /**
  * Handle non-streaming response
  */
-async function handleNonStreamingResponse(req, res, child, model, requestId, sessionKey, imagePaths, sessionUuid, recoveryInfo) {
+async function handleNonStreamingResponse(req, res, child, model, requestId, sessionKey, imagePaths, sessionUuid, recoveryInfo, canonicalIdentity) {
   const cleanupImages = () => {
     if (imagePaths.length > 0) {
       const tmpDir = path.dirname(imagePaths[0]);
@@ -1397,7 +1414,7 @@ async function handleNonStreamingResponse(req, res, child, model, requestId, ses
 
     // Track session on success (use actual sessionUuid, which may be a regen fork)
     if (code === 0 && sessionKey) {
-      sessions.set(sessionKey, { uuid: sessionUuid, lastUsed: Date.now() });
+      sessions.set(sessionKey, { uuid: sessionUuid, lastUsed: Date.now(), identity: canonicalIdentity });
       persistSessions();
       log(`[${requestId}] Session saved: ${sessionKey.slice(0, 8)}... (${sessions.size} active)`);
     }
