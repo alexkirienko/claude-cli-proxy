@@ -245,4 +245,65 @@ describe('Session: identity-based migration', () => {
     }
     assert.ok(found, 'session entry includes identity field');
   });
+
+  it('picks the most recently used session when multiple old sessions share identity', async () => {
+    const { request } = require('../helpers/test-server');
+    const spawnArgs = captureSpawnArgs();
+    const headers = { 'Content-Type': 'application/json' };
+
+    const identity = 'telegram:-1009999999999';
+    const oldKey = 'stale-key-old';
+    const recentKey = 'stale-key-recent';
+    const oldUuid = '11111111-1111-1111-1111-111111111111';
+    const recentUuid = '22222222-2222-2222-2222-222222222222';
+
+    // Pre-populate two sessions with the same identity but different lastUsed
+    internals.sessions.set(oldKey, {
+      uuid: oldUuid,
+      lastUsed: Date.now() - 120000,
+      identity,
+    });
+    internals.sessions.set(recentKey, {
+      uuid: recentUuid,
+      lastUsed: Date.now() - 30000,
+      identity,
+    });
+
+    const meta = {
+      schema: 'openclaw.inbound_meta.v1',
+      message_id: '999',
+      chat_id: identity,
+      channel: 'telegram',
+    };
+    const sysPrompt = `New prompt version.\n\`\`\`json\n${JSON.stringify(meta, null, 2)}\n\`\`\``;
+
+    const body = {
+      model: 'sonnet',
+      system: sysPrompt,
+      messages: [{ role: 'user', content: 'Hello after key change' }],
+      stream: false,
+    };
+
+    const res = await request(`${url}/v1/messages`, { method: 'POST', body, headers });
+    assert.equal(res.status, 200, 'request succeeds');
+
+    const realArgs = spawnArgs[1];
+    assert.ok(realArgs.includes('--resume'), 'uses --resume after migration');
+
+    const resumeIdx = realArgs.indexOf('--resume');
+    assert.equal(realArgs[resumeIdx + 1], recentUuid, 'migrates to the most recently used UUID');
+
+    // Only the recent key should have been deleted; old key stays
+    assert.ok(!internals.sessions.has(recentKey), 'recent old key removed');
+    assert.ok(internals.sessions.has(oldKey), 'stale old key still exists');
+
+    // Cleanup
+    internals.sessions.delete(oldKey);
+    for (const [key, entry] of internals.sessions) {
+      if (entry.uuid === recentUuid) {
+        internals.sessions.delete(key);
+        break;
+      }
+    }
+  });
 });

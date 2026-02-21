@@ -501,17 +501,23 @@ async function handleMessages(req, res) {
   // Identity-based fallback: when session key changed (e.g. after deploy) but
   // the same identity has an existing session under an old key, migrate it.
   if (!isResume && canonicalIdentity) {
+    let best = null;
     for (const [oldKey, entry] of sessions) {
       if (entry.identity === canonicalIdentity && oldKey !== sessionKey) {
-        sessionUuid = entry.uuid;
-        sessionJsonlPath = path.join(CLAUDE_CONFIG_DIR, 'projects', cwdSlug, `${sessionUuid}.jsonl`);
-        sessions.set(sessionKey, { ...entry, lastUsed: Date.now() });
-        sessions.delete(oldKey);
-        persistSessions();
-        isResume = true;
-        log(`[${requestId}] Migrated session ${oldKey.slice(0,8)} → ${sessionKey.slice(0,8)} (identity: ${canonicalIdentity})`);
-        break;
+        if (!best || entry.lastUsed > best[1].lastUsed) {
+          best = [oldKey, entry];
+        }
       }
+    }
+    if (best) {
+      const [oldKey, entry] = best;
+      sessionUuid = entry.uuid;
+      sessionJsonlPath = path.join(CLAUDE_CONFIG_DIR, 'projects', cwdSlug, `${sessionUuid}.jsonl`);
+      sessions.set(sessionKey, { ...entry, lastUsed: Date.now() });
+      sessions.delete(oldKey);
+      persistSessions();
+      isResume = true;
+      log(`[${requestId}] Migrated session ${oldKey.slice(0,8)} → ${sessionKey.slice(0,8)} (identity: ${canonicalIdentity})`);
     }
   }
 
