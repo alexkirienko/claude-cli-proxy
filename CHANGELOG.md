@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.4](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.11.3...v0.11.4) (2026-02-22)
+
+
+### Bug Fixes
+
+* detect compaction early via status event to prevent idle timeout kill ([c2b9fa5](https://github.com/alexkirienko/claude-cli-proxy/commit/c2b9fa52326ef90a825e85f1268746e866fd4b12))
+
 ## [0.11.3](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.11.2...v0.11.3) (2026-02-21)
 
 
