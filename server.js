@@ -1251,7 +1251,7 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
         state.compacting = true;
         resetIdleTimeout();  // Switch to 10-min timeout
         const meta = e.compact_metadata || {};
-        log(`[${requestId}] Context compaction started (trigger=${meta.trigger}, pre_tokens=${meta.pre_tokens})`);
+        log(`[${requestId}] Context compaction completed (trigger=${meta.trigger}, pre_tokens=${meta.pre_tokens})`);
         emitMonitorEvent('context_compaction', {
           requestId,
           trigger: meta.trigger,
@@ -1269,6 +1269,43 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
           type: 'content_block_delta',
           index: sseBlockIndex,
           delta: { type: 'text_delta', text: `--- Context Compaction${tokensLabel} ---\nConversation history has been summarized. Earlier messages are now compressed.\nIf I seem to have forgotten specific details, please remind me.` }
+        });
+        sendSSE(res, 'content_block_stop', {
+          type: 'content_block_stop',
+          index: sseBlockIndex
+        });
+      } else if (e.subtype === 'status' && e.status === 'compacting') {
+        state.compacting = true;
+        resetIdleTimeout();  // Switch to 10-min timeout BEFORE the long silence
+        log(`[${requestId}] Context compaction starting, extended idle timeout`);
+        emitMonitorEvent('context_compaction_start', { requestId });
+        // Ensure message_start envelope exists before sending content blocks
+        if (!state.messageStarted) {
+          sendSSE(res, 'message_start', {
+            type: 'message_start',
+            message: {
+              id: messageId,
+              type: 'message',
+              role: 'assistant',
+              model: model,
+              content: [],
+              stop_reason: null,
+              usage: { input_tokens: 0, output_tokens: 0 }
+            }
+          });
+          state.messageStarted = true;
+        }
+        // Notify client that compaction is starting
+        sseBlockIndex++;
+        sendSSE(res, 'content_block_start', {
+          type: 'content_block_start',
+          index: sseBlockIndex,
+          content_block: { type: 'text', text: '' }
+        });
+        sendSSE(res, 'content_block_delta', {
+          type: 'content_block_delta',
+          index: sseBlockIndex,
+          delta: { type: 'text_delta', text: '--- Compacting context, please wait... ---' }
         });
         sendSSE(res, 'content_block_stop', {
           type: 'content_block_stop',
