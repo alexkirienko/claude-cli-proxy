@@ -1,5 +1,7 @@
 const net = require('net');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
 
 /**
  * Start the server on a random available port for integration testing.
@@ -15,9 +17,14 @@ async function startTestServer() {
     srv.on('error', reject);
   });
 
-  // Set env before require
+  // Set env before require — use isolated temp workspace so tests never touch production sessions.
+  // Nest workspace one level deep so SESSIONS_FILE (derived from dirname(WORKSPACE)) is also isolated.
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-proxy-test-'));
+  const tmpWorkspace = path.join(tmpBase, 'workspace');
+  fs.mkdirSync(tmpWorkspace, { recursive: true });
   process.env.CLAUDE_PROXY_PORT = String(port);
   process.env.CLAUDE_PATH = '/bin/echo';
+  process.env.CLAUDE_PROXY_WORKSPACE = tmpWorkspace;
 
   // Clear module cache so each test file gets a fresh server
   const serverPath = path.resolve(__dirname, '../../server.js');
@@ -33,6 +40,43 @@ async function startTestServer() {
   // Shorten early-exit race for tests so mock "real" spawns (closeDelay ~50ms) survive it
   mod._internals.EARLY_EXIT_RACE_MS = 20;
 
+  // Track stub JSONL files created during this test run for cleanup
+  const createdStubs = new Set();
+
+  // Patch sessions.set to auto-create stub JSONL files — simulates real CLI behavior
+  // where each session has a corresponding JSONL file on disk.
+  const origSet = mod._internals.sessions.set.bind(mod._internals.sessions);
+  mod._internals.sessions.set = function(key, value) {
+    origSet(key, value);
+    if (value && value.uuid) {
+      const file = createSessionJsonl(mod._internals, value.uuid);
+      createdStubs.add(file);
+    }
+  };
+
+  // Patch sessions.delete to also remove stub JSONL files — prevents cross-test leakage.
+  // Only deletes the file if no other session entry still uses the same UUID (preserves
+  // JSONL during migrations where the UUID moves from old key to new key).
+  const origDelete = mod._internals.sessions.delete.bind(mod._internals.sessions);
+  mod._internals.sessions.delete = function(key) {
+    const entry = mod._internals.sessions.get(key);
+    const result = origDelete(key);
+    if (entry && entry.uuid) {
+      let uuidStillUsed = false;
+      for (const [, v] of mod._internals.sessions) {
+        if (v.uuid === entry.uuid) { uuidStillUsed = true; break; }
+      }
+      if (!uuidStillUsed) {
+        const cwdSlug = mod._internals.WORKSPACE.replace(/[/.]/g, '-');
+        const file = path.join(mod._internals.CLAUDE_CONFIG_DIR, 'projects', cwdSlug, `${entry.uuid}.jsonl`);
+        try { fs.unlinkSync(file); } catch {}
+        try { fs.unlinkSync(file + '.rotated'); } catch {}
+        createdStubs.delete(file);
+      }
+    }
+    return result;
+  };
+
   return {
     url: `http://127.0.0.1:${port}`,
     port,
@@ -41,6 +85,18 @@ async function startTestServer() {
     mod,
     close() {
       return new Promise((resolve) => {
+        // Clean up stub JSONL files created during this test run
+        for (const file of createdStubs) {
+          try { fs.unlinkSync(file); } catch {}
+          // Also clean .rotated variants (created by health rotation)
+          try { fs.unlinkSync(file + '.rotated'); } catch {}
+        }
+        createdStubs.clear();
+
+        // Remove temp base dir (includes workspace + sessions.json) to avoid leaking test artifacts
+        try { fs.rmSync(tmpBase, { recursive: true, force: true }); } catch {}
+        delete process.env.CLAUDE_PROXY_WORKSPACE;
+
         mod._server.close(resolve);
         delete require.cache[serverPath];
       });
@@ -75,4 +131,19 @@ async function request(url, options = {}) {
   });
 }
 
-module.exports = { startTestServer, request };
+/**
+ * Create a stub JSONL file for a session UUID so that resume checks pass.
+ * In production, the real CLI creates these files; in tests, mock CLIs don't.
+ */
+function createSessionJsonl(internals, uuid) {
+  const cwdSlug = internals.WORKSPACE.replace(/[/.]/g, '-');
+  const dir = path.join(internals.CLAUDE_CONFIG_DIR, 'projects', cwdSlug);
+  const file = path.join(dir, `${uuid}.jsonl`);
+  if (!fs.existsSync(file)) {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ type: 'user', message: { content: 'test stub' } }) + '\n');
+  }
+  return file;
+}
+
+module.exports = { startTestServer, request, createSessionJsonl };

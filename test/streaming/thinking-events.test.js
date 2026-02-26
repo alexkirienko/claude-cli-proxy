@@ -76,7 +76,7 @@ function pushThinkingThenTextEvents(child) {
   }
 }
 
-describe('Streaming: thinking events', () => {
+describe('Streaming: thinking events filtered from SSE', () => {
   let url, close;
   let spawnHandler;
 
@@ -109,7 +109,7 @@ describe('Streaming: thinking events', () => {
     };
   }
 
-  it('SSE output contains thinking content_block_start', async () => {
+  it('SSE output does NOT contain thinking content_block_start', async () => {
     configureSpawn(pushThinkingThenTextEvents);
 
     const res = await streamRequest(url, {
@@ -124,10 +124,10 @@ describe('Streaming: thinking events', () => {
            e.data?.content_block?.type === 'thinking'
     );
 
-    assert.ok(thinkingStart, 'thinking content_block_start is present');
+    assert.equal(thinkingStart, undefined, 'thinking content_block_start must NOT be in SSE');
   });
 
-  it('SSE output contains thinking_delta', async () => {
+  it('SSE output does NOT contain thinking_delta', async () => {
     configureSpawn(pushThinkingThenTextEvents);
 
     const res = await streamRequest(url, {
@@ -142,29 +142,10 @@ describe('Streaming: thinking events', () => {
            e.data?.delta?.type === 'thinking_delta'
     );
 
-    assert.ok(thinkingDelta, 'thinking_delta event is present');
-    assert.equal(thinkingDelta.data.delta.thinking, 'Let me think...');
+    assert.equal(thinkingDelta, undefined, 'thinking_delta must NOT be in SSE');
   });
 
-  it('thinking block has SSE index 0', async () => {
-    configureSpawn(pushThinkingThenTextEvents);
-
-    const res = await streamRequest(url, {
-      model: 'sonnet',
-      messages: [{ role: 'user', content: 'Think about this' }],
-      stream: true,
-    });
-
-    const events = parseSSE(res.body);
-    const thinkingStart = events.find(
-      e => e.event === 'content_block_start' &&
-           e.data?.content_block?.type === 'thinking'
-    );
-
-    assert.equal(thinkingStart.data.index, 0, 'thinking block at SSE index 0');
-  });
-
-  it('text block has SSE index 1', async () => {
+  it('text block gets SSE index 0 (thinking no longer occupies an index)', async () => {
     configureSpawn(pushThinkingThenTextEvents);
 
     const res = await streamRequest(url, {
@@ -179,34 +160,11 @@ describe('Streaming: thinking events', () => {
            e.data?.content_block?.type === 'text'
     );
 
-    assert.equal(textStart.data.index, 1, 'text block at SSE index 1');
+    assert.ok(textStart, 'text block must be present');
+    assert.equal(textStart.data.index, 0, 'text block at SSE index 0');
   });
 
-  it('thinking is not filtered like tool_use', async () => {
-    configureSpawn(pushThinkingThenTextEvents);
-
-    const res = await streamRequest(url, {
-      model: 'sonnet',
-      messages: [{ role: 'user', content: 'Think about this' }],
-      stream: true,
-    });
-
-    const events = parseSSE(res.body);
-
-    const thinkingStarts = events.filter(
-      e => e.event === 'content_block_start' &&
-           e.data?.content_block?.type === 'thinking'
-    );
-    const thinkingDeltas = events.filter(
-      e => e.event === 'content_block_delta' &&
-           e.data?.delta?.type === 'thinking_delta'
-    );
-
-    assert.equal(thinkingStarts.length, 1, 'exactly one thinking start');
-    assert.equal(thinkingDeltas.length, 1, 'exactly one thinking delta');
-  });
-
-  it('events arrive in order: thinking start, thinking delta, thinking stop, text start, text delta, text stop', async () => {
+  it('only text events appear in SSE timeline', async () => {
     configureSpawn(pushThinkingThenTextEvents);
 
     const res = await streamRequest(url, {
@@ -231,12 +189,9 @@ describe('Streaming: thinking events', () => {
       });
 
     const expectedOrder = [
-      'thinking_start',
-      'thinking_delta',
-      'block_stop_0',
       'text_start',
       'text_delta',
-      'block_stop_1',
+      'block_stop_0',
     ];
 
     assert.deepEqual(timeline, expectedOrder);

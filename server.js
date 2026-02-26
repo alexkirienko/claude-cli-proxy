@@ -117,6 +117,16 @@ const IDLE_TIMEOUT_MS = 60 * 1000;          // 60 sec without data = kill child
 const TOOL_IDLE_TIMEOUT_MS = 300 * 1000;    // 5 min during tool execution (CLI runs tools locally)
 const COMPACTION_TIMEOUT_MS = 600 * 1000;    // 10 min during compaction
 
+// Dangerous tool patterns: if the last assistant action matches, the session is "stuck"
+// and resuming would cause the model to re-execute the dangerous command.
+const DANGEROUS_TOOL_PATTERNS = [
+  { tool: /^Bash$/i, input: /openclaw\s+gateway\s+restart/i },
+  { tool: /^Bash$/i, input: /systemctl\s+(--user\s+)?restart\s+(openclaw|claude-cli-proxy|openclaw-gateway)/i },
+  { tool: /^Bash$/i, input: /systemctl\s+(--user\s+)?stop\s+(openclaw|claude-cli-proxy|openclaw-gateway)/i },
+  { tool: /^Bash$/i, input: /pkill\s+.*\b(openclaw|claude-cli-proxy)\b/i },
+  { tool: /^Bash$/i, input: /rm\s+(-rf?|--recursive)\s+.*\/(\.claude|\.openclaw|claude-cli-proxy)\b/i },
+];
+
 // Gateway metadata tags to strip from prompts and responses
 const GATEWAY_TAG_RE = /\[\[reply_to_message_id:\s*\d+\]\]\s*/g;
 
@@ -280,6 +290,89 @@ function truncateSessionForRegenerate(jsonlPath, newUuid, cwdSlug) {
 }
 
 /**
+ * Efficiently read the last `maxBytes` of a file and return complete JSONL lines.
+ * Drops the partial first line when reading from an offset > 0.
+ */
+function readTailLines(filePath, maxBytes = 65536) {
+  let fd;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const stat = fs.fstatSync(fd);
+    const size = stat.size;
+    if (size === 0) return [];
+
+    const readSize = Math.min(maxBytes, size);
+    const offset = size - readSize;
+    const buf = Buffer.alloc(readSize);
+    fs.readSync(fd, buf, 0, readSize, offset);
+    const raw = buf.toString('utf8');
+
+    // If we read from a non-zero offset, drop the first (partial) line
+    let text = raw;
+    if (offset > 0) {
+      const nlIdx = raw.indexOf('\n');
+      text = nlIdx >= 0 ? raw.slice(nlIdx + 1) : '';
+    }
+
+    return text.split('\n').filter(Boolean);
+  } catch {
+    return [];
+  } finally {
+    if (fd !== undefined) try { fs.closeSync(fd); } catch {}
+  }
+}
+
+/**
+ * Check if a session JSONL is "stuck" — i.e. the last assistant action is a dangerous
+ * tool_use that would be re-executed on resume.
+ * Returns { healthy: true } or { healthy: false, reason, toolName, inputPreview }.
+ * Safe by default: returns healthy on parse errors, missing files, no assistant messages.
+ */
+function checkSessionHealth(jsonlPath) {
+  const lines = readTailLines(jsonlPath);
+  if (lines.length === 0) return { healthy: true };
+
+  // Walk backwards to find last assistant entry
+  let lastAssistant = null;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const entry = JSON.parse(lines[i]);
+      if (entry?.type === 'assistant') {
+        lastAssistant = entry;
+        break;
+      }
+    } catch { continue; }
+  }
+
+  if (!lastAssistant) return { healthy: true };
+
+  const content = lastAssistant.message?.content;
+  if (!Array.isArray(content) || content.length === 0) return { healthy: true };
+
+  // Check the last content block
+  const lastBlock = content[content.length - 1];
+  if (lastBlock?.type !== 'tool_use') return { healthy: true };
+
+  const toolName = lastBlock.name || '';
+  const toolInput = typeof lastBlock.input === 'string'
+    ? lastBlock.input
+    : (lastBlock.input?.command || lastBlock.input?.content || JSON.stringify(lastBlock.input || ''));
+
+  for (const pattern of DANGEROUS_TOOL_PATTERNS) {
+    if (pattern.tool.test(toolName) && pattern.input.test(toolInput)) {
+      return {
+        healthy: false,
+        reason: `Last assistant action matches dangerous pattern: ${toolName}`,
+        toolName,
+        inputPreview: toolInput.slice(0, 200),
+      };
+    }
+  }
+
+  return { healthy: true };
+}
+
+/**
  * Extract usable context from an old session's JSONL for recovery after resume failure.
  * Looks for compact summaries first (best context), falls back to recent exchanges.
  * Returns a string of recovered context, or null if nothing usable.
@@ -318,6 +411,63 @@ function extractRecoveryContext(jsonlPath) {
   return recent.length > 0
     ? 'Previous conversation excerpt:\n' + recent.join('\n')
     : null;
+}
+
+/**
+ * Scan session directory for JSONL files containing the same identity (chat_id).
+ * Returns recovery context from the best identity-matching file, or from the most
+ * recent file as fallback. Used when the expected JSONL is missing.
+ */
+function findRecoveryContext(sessionDir, identity) {
+  let files;
+  try {
+    files = fs.readdirSync(sessionDir)
+      .filter(f => f.endsWith('.jsonl') && !f.endsWith('.rotated'))
+      .map(f => {
+        const full = path.join(sessionDir, f);
+        try {
+          const stat = fs.statSync(full);
+          return { path: full, mtime: stat.mtimeMs };
+        } catch { return null; }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.mtime - a.mtime); // newest first
+  } catch { return null; }
+
+  if (files.length === 0) return null;
+
+  // If we have an identity, try to find a file containing it
+  if (identity) {
+    for (const f of files) {
+      const lines = readTailLines(f.path, 16384);
+      // Also check the head (system prompt is often at the start)
+      let headLines;
+      try {
+        const fd = fs.openSync(f.path, 'r');
+        const buf = Buffer.alloc(Math.min(8192, fs.fstatSync(fd).size));
+        fs.readSync(fd, buf, 0, buf.length, 0);
+        fs.closeSync(fd);
+        headLines = buf.toString('utf8').split('\n').filter(Boolean);
+      } catch { headLines = []; }
+
+      const allLines = [...new Set([...headLines, ...lines])];
+      for (const line of allLines) {
+        if (line.includes(identity)) {
+          const ctx = extractRecoveryContext(f.path);
+          if (ctx) return ctx;
+          break; // file matched identity but had no usable context, keep searching
+        }
+      }
+    }
+  }
+
+  // Fallback: try the most recent file
+  for (const f of files) {
+    const ctx = extractRecoveryContext(f.path);
+    if (ctx) return ctx;
+  }
+
+  return null;
 }
 
 /**
@@ -511,13 +661,66 @@ async function handleMessages(req, res) {
     }
     if (best) {
       const [oldKey, entry] = best;
-      sessionUuid = entry.uuid;
-      sessionJsonlPath = path.join(CLAUDE_CONFIG_DIR, 'projects', cwdSlug, `${sessionUuid}.jsonl`);
-      sessions.set(sessionKey, { ...entry, lastUsed: Date.now() });
-      sessions.delete(oldKey);
-      persistSessions();
-      isResume = true;
-      log(`[${requestId}] Migrated session ${oldKey.slice(0,8)} → ${sessionKey.slice(0,8)} (identity: ${canonicalIdentity})`);
+      const candidatePath = path.join(CLAUDE_CONFIG_DIR, 'projects', cwdSlug, `${entry.uuid}.jsonl`);
+      if (fs.existsSync(candidatePath)) {
+        sessionUuid = entry.uuid;
+        sessionJsonlPath = candidatePath;
+        sessions.set(sessionKey, { ...entry, lastUsed: Date.now() });
+        sessions.delete(oldKey);
+        persistSessions();
+        isResume = true;
+        log(`[${requestId}] Migrated session ${oldKey.slice(0,8)} → ${sessionKey.slice(0,8)} (identity: ${canonicalIdentity})`);
+      } else {
+        sessions.delete(oldKey);
+        persistSessions();
+        log(`[${requestId}] Skipped stale migration ${oldKey.slice(0,8)}: JSONL missing for ${entry.uuid.slice(0,8)}`);
+      }
+    }
+  }
+
+  // Disk-based fallback: scan JSONL files for matching identity
+  if (!isResume && canonicalIdentity) {
+    const projectDir = path.join(CLAUDE_CONFIG_DIR, 'projects', cwdSlug);
+    try {
+      const files = fs.readdirSync(projectDir).filter(f => f.endsWith('.jsonl') && !f.endsWith('.rotated'));
+      let bestFile = null;
+      let bestMtime = 0;
+      for (const file of files) {
+        const fp = path.join(projectDir, file);
+        const stat = fs.statSync(fp);
+        if (stat.mtimeMs <= bestMtime) continue;  // skip older files
+        // Read first and last 4KB looking for identity match
+        const fd = fs.openSync(fp, 'r');
+        const size = stat.size;
+        const headSize = Math.min(4096, size);
+        const headBuf = Buffer.alloc(headSize);
+        fs.readSync(fd, headBuf, 0, headSize, 0);
+        let sample = headBuf.toString('utf8', 0, headSize);
+        if (size > 4096) {
+          const tailSize = Math.min(4096, size - headSize);
+          const tailBuf = Buffer.alloc(tailSize);
+          fs.readSync(fd, tailBuf, 0, tailSize, size - tailSize);
+          sample += tailBuf.toString('utf8', 0, tailSize);
+        }
+        fs.closeSync(fd);
+        if (sample.includes(`"identity":"${canonicalIdentity}"`) ||
+            sample.includes(`"identity": "${canonicalIdentity}"`)) {
+          bestFile = file;
+          bestMtime = stat.mtimeMs;
+        }
+      }
+      if (bestFile) {
+        const recoveredUuid = bestFile.replace('.jsonl', '');
+        const recoveredPath = path.join(projectDir, bestFile);
+        sessionUuid = recoveredUuid;
+        sessionJsonlPath = recoveredPath;
+        sessions.set(sessionKey, { uuid: recoveredUuid, lastUsed: Date.now(), identity: canonicalIdentity });
+        persistSessions();
+        isResume = true;
+        log(`[${requestId}] Recovered session from disk: ${recoveredUuid.slice(0,8)} (identity: ${canonicalIdentity})`);
+      }
+    } catch (err) {
+      debug(`[${requestId}] Disk recovery scan failed: ${err.message}`);
     }
   }
 
@@ -592,7 +795,7 @@ async function handleMessages(req, res) {
     if (isResume) {
       args.push('--resume', sessionUuid);
       // Nudge the agent to re-read project instructions after compaction
-      let appendPrompt = 'Remember: read CLAUDE.md project instructions. Check workspace files (SOUL.md, memory/) if context feels incomplete.';
+      let appendPrompt = 'Remember: read CLAUDE.md project instructions. Check workspace files (SOUL.md, memory/) if context feels incomplete.\nIMPORTANT: Focus ONLY on the new user message below. Do NOT continue or retry any previous tool calls or commands.';
       // Forward the current request's metadata block so the AI knows the source channel.
       // Uses the same JSON code fence format as OpenClaw's system prompt.
       const metaMatch = sysText.match(/```json\n[\s\S]*?```/);
@@ -688,6 +891,92 @@ async function handleMessages(req, res) {
   // - --resume fail → fall back to --session-id (new session)
   // - other error → retry once (preserves JSONL)
   async function spawnWithRetry() {
+    // Pre-resume health check: detect missing files and stuck sessions before spawning
+    if (isResume) {
+      const jsonlExists = fs.existsSync(sessionJsonlPath);
+      const sessionDir = path.dirname(sessionJsonlPath);
+
+      // Check 1: JSONL file is missing entirely
+      if (!jsonlExists) {
+        log(`[${requestId}] Session JSONL missing: ${sessionJsonlPath}`);
+        emitMonitorEvent('session_jsonl_missing', {
+          requestId,
+          sessionKey: sessionKey.slice(0, 8),
+          uuid: sessionUuid.slice(0, 8),
+        });
+
+        // Try to recover context from other JSONL files for this identity
+        const recoveryCtx = findRecoveryContext(sessionDir, canonicalIdentity);
+
+        const oldUuid = sessionUuid;
+        sessionUuid = sessionKeyToUuid(sessionKey + ':recover:' + Date.now());
+        sessionJsonlPath = path.join(CLAUDE_CONFIG_DIR, 'projects', cwdSlug, `${sessionUuid}.jsonl`);
+
+        if (recoveryCtx) {
+          sysText += '\n\n--- Recovered from previous session ---\n' + recoveryCtx;
+          recoveredContext = recoveryCtx;
+          log(`[${requestId}] Recovered ${recoveryCtx.length} chars from other JSONL files (old uuid: ${oldUuid.slice(0, 8)})`);
+        } else {
+          log(`[${requestId}] No recoverable context found for identity ${canonicalIdentity || 'unknown'}`);
+        }
+
+        isResume = false;
+        resumeFailed = true;
+        sessions.delete(sessionKey);
+        persistSessions();
+      }
+
+      // Check 2: JSONL exists but session is stuck on dangerous tool
+      if (jsonlExists) {
+        const health = checkSessionHealth(sessionJsonlPath);
+        if (!health.healthy) {
+          log(`[${requestId}] Session health check FAILED: ${health.reason} (input: ${health.inputPreview})`);
+          emitMonitorEvent('session_health_rotation', {
+            requestId,
+            sessionKey: sessionKey.slice(0, 8),
+            oldUuid: sessionUuid.slice(0, 8),
+            reason: health.reason,
+            toolName: health.toolName,
+            inputPreview: health.inputPreview,
+          });
+
+          // Extract recovery context BEFORE rename; fall back to scanning other files
+          let recoveryCtx = extractRecoveryContext(sessionJsonlPath);
+          if (!recoveryCtx) {
+            recoveryCtx = findRecoveryContext(sessionDir, canonicalIdentity);
+          }
+
+          // Rename old JSONL to .rotated
+          try {
+            fs.renameSync(sessionJsonlPath, sessionJsonlPath + '.rotated');
+            log(`[${requestId}] Rotated stuck session file to .rotated`);
+          } catch (e) {
+            log(`[${requestId}] Warning: could not rename stuck JSONL: ${e.message}`);
+          }
+
+          // Generate new session UUID
+          const oldUuid = sessionUuid;
+          sessionUuid = sessionKeyToUuid(sessionKey + ':health:' + Date.now());
+          sessionJsonlPath = path.join(CLAUDE_CONFIG_DIR, 'projects', cwdSlug, `${sessionUuid}.jsonl`);
+
+          // Inject recovered context into system prompt
+          if (recoveryCtx) {
+            sysText += '\n\n--- Recovered from previous session ---\n' + recoveryCtx;
+            recoveredContext = recoveryCtx;
+            log(`[${requestId}] Recovered ${recoveryCtx.length} chars from stuck session ${oldUuid.slice(0, 8)}`);
+          } else {
+            log(`[${requestId}] No recoverable context from stuck session ${oldUuid.slice(0, 8)}`);
+          }
+
+          // Switch to new session mode
+          isResume = false;
+          resumeFailed = true;
+          sessions.delete(sessionKey);
+          persistSessions();
+        }
+      }
+    }
+
     // Helper: wait up to EARLY_EXIT_RACE_MS to see if child exits early
     async function raceEarlyExit(child) {
       let stderrBuf = '';
@@ -739,11 +1028,15 @@ async function handleMessages(req, res) {
       resumeFailed = true;
       sessionUuid = sessionKeyToUuid(sessionKey + ':v' + Date.now());
 
-      // Try to recover context from old session's JSONL
+      // Try to recover context from old session's JSONL, fall back to scanning other files
       const oldJsonlPath = path.join(
         CLAUDE_CONFIG_DIR, 'projects', cwdSlug, `${oldUuid}.jsonl`
       );
       recoveredContext = extractRecoveryContext(oldJsonlPath);
+      if (!recoveredContext) {
+        const sessionDir = path.join(CLAUDE_CONFIG_DIR, 'projects', cwdSlug);
+        recoveredContext = findRecoveryContext(sessionDir, canonicalIdentity);
+      }
       if (recoveredContext) {
         sysText += '\n\n--- Recovered from previous session ---\n' + recoveredContext;
         log(`[${requestId}] Recovered ${recoveredContext.length} chars from old session ${oldUuid.slice(0, 8)}`);
@@ -843,6 +1136,7 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
   let currentBlockType = null;
   let sseBlockIndex = -1;           // SSE output index (excludes filtered tool_use blocks)
   let insideToolUseBlock = false;   // true during tool_use block streaming
+  let insideThinkingBlock = false;  // true during thinking block streaming
 
   // Tracking state (must be declared before resetIdleTimeout which references it)
   const state = {
@@ -973,6 +1267,13 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
       sessions.set(sessionKey, { uuid: sessionUuid, lastUsed: Date.now(), identity: canonicalIdentity });
       persistSessions();
       log(`[${requestId}] Session saved: ${sessionKey.slice(0, 8)}... (${sessions.size} active)`);
+      // Persist identity marker to JSONL for disk-based recovery
+      if (canonicalIdentity) {
+        const cwdSlug = WORKSPACE.replace(/[/.]/g, '-');
+        const jsonlPath = path.join(CLAUDE_CONFIG_DIR, 'projects', cwdSlug, `${sessionUuid}.jsonl`);
+        const marker = JSON.stringify({ type: 'queue-operation', operation: 'enqueue', timestamp: new Date().toISOString(), sessionId: sessionUuid, identity: canonicalIdentity });
+        fs.appendFile(jsonlPath, marker + '\n', () => {});
+      }
     }
 
     cleanupImages();
@@ -994,7 +1295,7 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
     }
 
     // Close any open non-tool_use content blocks visible to gateway
-    if ((state.thinking || state.textStarted) && !insideToolUseBlock) {
+    if ((state.textStarted) && !insideToolUseBlock && !insideThinkingBlock) {
       sendSSE(res, 'content_block_stop', {
         type: 'content_block_stop',
         index: sseBlockIndex >= 0 ? sseBlockIndex : 0
@@ -1075,8 +1376,14 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
           toolId: block.id,
           toolName: block.name
         });
+      } else if (block.type === 'thinking') {
+        // Filter thinking from SSE output — internal reasoning should not reach end users
+        insideThinkingBlock = true;
+        state.thinking = true;
+        emitMonitorEvent('thinking_start', { requestId, index: currentBlockIndex });
+        // Do NOT sendSSE, do NOT increment sseBlockIndex
       } else {
-        // thinking or text — send to gateway
+        // text only — send to gateway
         state.compacting = false;   // compaction done, content flowing again
         state.toolExecuting = false;
         resetIdleTimeout();  // Switch back to normal timeout
@@ -1088,13 +1395,8 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
           content_block: block
         });
 
-        if (block.type === 'thinking') {
-          state.thinking = true;
-          emitMonitorEvent('thinking_start', { requestId, index: sseBlockIndex });
-        } else if (block.type === 'text') {
-          state.textStarted = true;
-          emitMonitorEvent('text_start', { requestId, index: sseBlockIndex });
-        }
+        state.textStarted = true;
+        emitMonitorEvent('text_start', { requestId, index: sseBlockIndex });
       }
 
       return;
@@ -1117,26 +1419,29 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
         return;
       }
 
+      // Filter thinking deltas — don't forward to gateway
+      if (insideThinkingBlock) {
+        if (delta.type === 'thinking_delta') {
+          emitMonitorEvent('thinking_delta', {
+            requestId,
+            index: currentBlockIndex,
+            thinkingPreview: (delta.thinking || '').slice(0, 100)
+          });
+        }
+        return;
+      }
+
       // Strip gateway metadata tags from outgoing text (may leak from session history)
       if (delta.type === 'text_delta' && delta.text) {
         delta = { ...delta, text: delta.text.replace(GATEWAY_TAG_RE, '') };
       }
 
-      // Forward thinking/text deltas with remapped index
+      // Forward text deltas with remapped index
       sendSSE(res, 'content_block_delta', {
         type: 'content_block_delta',
         index: sseBlockIndex >= 0 ? sseBlockIndex : 0,
         delta: delta
       });
-
-      // Track thinking content
-      if (delta.type === 'thinking_delta') {
-        emitMonitorEvent('thinking_delta', {
-          requestId,
-          index: sseBlockIndex,
-          thinkingPreview: (delta.thinking || '').slice(0, 100)
-        });
-      }
 
       // Track text_delta - mark that text was already streamed
       if (delta.type === 'text_delta') {
@@ -1166,28 +1471,28 @@ async function handleStreamingResponse(req, res, child, model, requestId, sessio
         state.toolUse = null;
         insideToolUseBlock = false;
         // Note: toolExecuting stays true until next thinking/text block starts
+      } else if (currentBlockType === 'thinking') {
+        // Don't forward thinking stop to gateway
+        insideThinkingBlock = false;
+        state.thinking = false;
+        emitMonitorEvent('thinking_end', {
+          requestId,
+          index: currentBlockIndex,
+          duration: blockInfo?.duration
+        });
       } else {
-        // Forward thinking/text stop with remapped index
+        // Forward text stop with remapped index
         sendSSE(res, 'content_block_stop', {
           type: 'content_block_stop',
           index: sseBlockIndex >= 0 ? sseBlockIndex : 0
         });
 
-        if (currentBlockType === 'thinking') {
-          state.thinking = false;
-          emitMonitorEvent('thinking_end', {
-            requestId,
-            index: sseBlockIndex,
-            duration: blockInfo?.duration
-          });
-        } else if (currentBlockType === 'text') {
-          state.textStarted = false;
-          emitMonitorEvent('text_end', {
-            requestId,
-            index: sseBlockIndex,
-            duration: blockInfo?.duration
-          });
-        }
+        state.textStarted = false;
+        emitMonitorEvent('text_end', {
+          requestId,
+          index: sseBlockIndex,
+          duration: blockInfo?.duration
+        });
       }
 
       currentBlockType = null;
@@ -1460,6 +1765,13 @@ async function handleNonStreamingResponse(req, res, child, model, requestId, ses
       sessions.set(sessionKey, { uuid: sessionUuid, lastUsed: Date.now(), identity: canonicalIdentity });
       persistSessions();
       log(`[${requestId}] Session saved: ${sessionKey.slice(0, 8)}... (${sessions.size} active)`);
+      // Persist identity marker to JSONL for disk-based recovery
+      if (canonicalIdentity) {
+        const cwdSlug = WORKSPACE.replace(/[/.]/g, '-');
+        const jsonlPath = path.join(CLAUDE_CONFIG_DIR, 'projects', cwdSlug, `${sessionUuid}.jsonl`);
+        const marker = JSON.stringify({ type: 'queue-operation', operation: 'enqueue', timestamp: new Date().toISOString(), sessionId: sessionUuid, identity: canonicalIdentity });
+        fs.appendFile(jsonlPath, marker + '\n', () => {});
+      }
     }
 
     cleanupImages();
@@ -1777,12 +2089,14 @@ const _internals = {
   IDLE_TIMEOUT_MS, TOOL_IDLE_TIMEOUT_MS, COMPACTION_TIMEOUT_MS,
   WORKSPACE, CLAUDE_CONFIG_DIR, CLAUDE_PATH, HOME, identityMap,
   SESSIONS_FILE, EARLY_EXIT_RACE_MS: 3000,
+  DANGEROUS_TOOL_PATTERNS,
 };
 
 module.exports = {
   parseSender, parseChatId, sessionKeyToUuid, generateMessageId,
   extractJsonObjects, mapModelName, writeImagesToTmp,
-  truncateSessionForRegenerate, extractRecoveryContext,
+  truncateSessionForRegenerate, extractRecoveryContext, findRecoveryContext,
+  readTailLines, checkSessionHealth,
   gracefulShutdown, resolveIdentity, killChild, persistSessions,
   _server: server,
   _internals,
