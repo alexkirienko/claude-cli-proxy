@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.11.4...v0.12.0) (2026-02-26)
+
+
+### Features
+
+* session health checks, identity markers, disk-based recovery, thinking filter ([7dba511](https://github.com/alexkirienko/claude-cli-proxy/commit/7dba5112e51988d577751c73be6471764eb5df24))
+
 ## [0.11.4](https://github.com/alexkirienko/claude-cli-proxy/compare/v0.11.3...v0.11.4) (2026-02-22)
 
 
